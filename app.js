@@ -1,9 +1,12 @@
 console.log("maintenance app.js loaded");
 
 // ====== CONFIG ======
+// IMPORTANT: Use the URL + ANON PUBLIC KEY from the SAME Supabase project:
+// Supabase Dashboard → Settings → API
 const SUPABASE_URL = "https://hfyvjtaumvmaqeqkmiyk.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhmeXZqdGF1bXZtYXFlcWttaXlrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEyNDgxNTksImV4cCI6MjA4NjgyNDE1OX0.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhmeXZqdGF1bXZtYXFlcWttaXlrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEyNDgxNTksImV4cCI6MjA4NjgyNDE1OX0.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do"; const YELLOW_AFTER_MIN = 5;
 
+// Timer thresholds
 const YELLOW_AFTER_MIN = 5;
 const RED_AFTER_MIN = 10;
 
@@ -50,24 +53,62 @@ function urgencyClass(sec) {
   return "uGreen";
 }
 
-// Freeze timer when done/confirmed (duration_sec stored when DONE)
+// freeze logic from ticket object
 function calcSeconds(t) {
   const startD = parseTs(t?.created_at);
   if (!startD) return null;
   const start = startD.getTime();
 
+  // frozen duration
   if (t.duration_sec != null && Number.isFinite(Number(t.duration_sec))) {
     return Number(t.duration_sec);
   }
 
   const st = String(t.status || "").toUpperCase();
   let stopD = null;
+
+  // stop time preference: confirmed > done
   if ((st === "CONFIRMED" || st === "REOPENED") && t.confirmed_at) stopD = parseTs(t.confirmed_at);
   if (!stopD && (st === "DONE" || st === "CONFIRMED" || st === "REOPENED") && t.done_at) stopD = parseTs(t.done_at);
 
   if (stopD) return Math.max(0, Math.floor((stopD.getTime() - start) / 1000));
   return Math.max(0, Math.floor((Date.now() - start) / 1000));
 }
+
+// ====== LIVE TIMER (NO RE-FETCH) ======
+function secondsFromDataset(el) {
+  const createdAt = el.dataset.createdAt;
+  if (!createdAt) return null;
+
+  const start = parseTs(createdAt)?.getTime();
+  if (!start) return null;
+
+  // frozen duration if present
+  const dur = el.dataset.durationSec;
+  if (dur != null && dur !== "" && Number.isFinite(Number(dur))) {
+    return Number(dur);
+  }
+
+  const status = (el.dataset.status || "").toUpperCase();
+  const doneAt = el.dataset.doneAt;
+  const confAt = el.dataset.confirmedAt;
+
+  let stop = null;
+  if ((status === "CONFIRMED" || status === "REOPENED") && confAt) stop = parseTs(confAt)?.getTime();
+  if (!stop && (status === "DONE" || status === "CONFIRMED" || status === "REOPENED") && doneAt) stop = parseTs(doneAt)?.getTime();
+
+  if (stop) return Math.max(0, Math.floor((stop - start) / 1000));
+  return Math.max(0, Math.floor((Date.now() - start) / 1000));
+}
+
+function updateTimersOnly() {
+  document.querySelectorAll("[data-timer='1']").forEach((el) => {
+    const sec = secondsFromDataset(el);
+    el.textContent = formatSec(sec);
+  });
+}
+// One global ticker for any screen that has timer elements
+setInterval(updateTimersOnly, 1000);
 
 // ====== CSV HELPERS ======
 function escCsv(v) {
@@ -78,7 +119,7 @@ function escCsv(v) {
 function pad2(n) { return String(n).padStart(2, "0"); }
 function toDateInputValue(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
 
-// ====== MODAL HELPERS ======
+// ====== MODAL HELPER ======
 function showModal(innerHtml) {
   const wrap = document.createElement("div");
   wrap.style.position = "fixed";
@@ -89,10 +130,7 @@ function showModal(innerHtml) {
   wrap.style.zIndex = "9999";
   wrap.innerHTML = innerHtml;
   document.body.appendChild(wrap);
-  return {
-    el: wrap,
-    close: () => wrap.remove(),
-  };
+  return { el: wrap, close: () => wrap.remove() };
 }
 
 // ====== PARTS HELPERS ======
@@ -103,7 +141,7 @@ async function findPartByNo(partNo) {
     .eq("part_no", partNo)
     .maybeSingle();
   if (error) throw error;
-  return data; // can be null
+  return data; // null if not found
 }
 
 async function loadPartsForTicket(ticketId) {
@@ -113,16 +151,13 @@ async function loadPartsForTicket(ticketId) {
     .eq("ticket_id", ticketId)
     .order("created_at", { ascending: true });
 
-  if (error) {
-    console.error(error);
-    return [];
-  }
+  if (error) { console.error(error); return []; }
   return data || [];
 }
 
 function partsListHtml(partsRows) {
   if (!partsRows || partsRows.length === 0) return "";
-  const lines = partsRows.map(r => {
+  const lines = partsRows.map((r) => {
     const p = r.spare_parts || {};
     const name = p.part_no ? `${p.part_no} — ${p.part_name || ""}` : (p.part_name || "Part");
     const uom = p.uom || "";
@@ -132,10 +167,6 @@ function partsListHtml(partsRows) {
 }
 
 // ====== ROUTING ======
-// #line/L1
-// #maintenance
-// #monitor
-// #parts
 if (route.startsWith("#line/")) loadLine(route.split("/")[1]);
 else if (route.startsWith("#monitor")) loadMonitor();
 else if (route.startsWith("#parts")) loadPartsScreen();
@@ -210,7 +241,13 @@ async function loadLine(line) {
       card.innerHTML = `
         <div class="cardTop">
           <div class="pill">${t.station}</div>
-          <div class="timeBig">${formatSec(sec)}</div>
+          <div class="timeBig"
+               data-timer="1"
+               data-created-at="${t.created_at || ""}"
+               data-status="${t.status || ""}"
+               data-done-at="${t.done_at || ""}"
+               data-confirmed-at="${t.confirmed_at || ""}"
+               data-duration-sec="${t.duration_sec ?? ""}">${formatSec(sec)}</div>
         </div>
 
         <div class="title">${t.priority} — ${t.status}</div>
@@ -251,7 +288,7 @@ async function loadLine(line) {
               confirmed_at: new Date().toISOString(),
               operator_comment: reason || null,
               duration_sec: null,
-              done_at: null
+              done_at: null,
             })
             .eq("id", t.id);
           if (error) console.error(error);
@@ -330,6 +367,7 @@ async function loadLine(line) {
     })
     .subscribe();
 
+  // keep line view auto-refresh (simple and ok)
   setInterval(refreshMy, 2000);
 }
 
@@ -433,7 +471,6 @@ async function loadMaintenance() {
 
   function syncDateInputs() {
     const { from, to } = buildRangeISO();
-
     if (presetEl.value !== "custom") {
       fromEl.value = toDateInputValue(from);
       toEl.value = toDateInputValue(to);
@@ -455,7 +492,13 @@ async function loadMaintenance() {
     card.innerHTML = `
       <div class="cardTop">
         <div class="pill">${t.line}</div>
-        <div class="timeBig">${formatSec(sec)}</div>
+        <div class="timeBig"
+             data-timer="1"
+             data-created-at="${t.created_at || ""}"
+             data-status="${t.status || ""}"
+             data-done-at="${t.done_at || ""}"
+             data-confirmed-at="${t.confirmed_at || ""}"
+             data-duration-sec="${t.duration_sec ?? ""}">${formatSec(sec)}</div>
       </div>
 
       <div class="title">${t.station} — ${t.priority}</div>
@@ -499,8 +542,7 @@ async function loadMaintenance() {
       const comment = prompt("Short fix comment (required):", "Fixed / adjusted / replaced…");
       if (!comment || !comment.trim()) { alert("Comment required."); return; }
 
-      // Optional parts used:
-      // Format: PARTNO=QTY,PARTNO=QTY
+      // optional parts: PARTNO=QTY,PARTNO=QTY
       const raw = prompt("Parts used? Format: PARTNO=QTY,PARTNO=QTY (leave empty if none)", "");
 
       try {
@@ -600,7 +642,7 @@ async function loadMaintenance() {
       const st = String(t.status || "").toUpperCase();
       if (st === "TAKEN") by.TAKEN.push(t);
       else if (st === "DONE") by.DONE.push(t);
-      else by.NEW.push(t); // NEW or REOPENED
+      else by.NEW.push(t);
     });
 
     ["NEW", "TAKEN", "DONE"].forEach(k =>
@@ -667,6 +709,7 @@ async function loadMaintenance() {
   syncDateInputs();
   render();
 
+  // Realtime updates only (NO 2s polling → stops the “refresh” feeling)
   sb.channel("tickets_maintenance")
     .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
     .subscribe();
@@ -677,8 +720,6 @@ async function loadMaintenance() {
   presetEl.addEventListener("change", () => { syncDateInputs(); render(); });
   fromEl.addEventListener("change", () => { presetEl.value = "custom"; syncDateInputs(); render(); });
   toEl.addEventListener("change", () => { presetEl.value = "custom"; syncDateInputs(); render(); });
-
-  setInterval(render, 2000);
 }
 
 // ====== MONITOR ======
@@ -715,12 +756,20 @@ async function loadMonitor() {
     rowsEl.innerHTML = "";
     for (const { t, sec } of items) {
       const partsRows = await loadPartsForTicket(t.id);
+
       const card = document.createElement("div");
       card.className = `card ${urgencyClass(sec)}`;
+
       card.innerHTML = `
         <div class="cardTop">
           <div class="pill">${t.line}</div>
-          <div class="timeBig">${formatSec(sec)}</div>
+          <div class="timeBig"
+               data-timer="1"
+               data-created-at="${t.created_at || ""}"
+               data-status="${t.status || ""}"
+               data-done-at="${t.done_at || ""}"
+               data-confirmed-at="${t.confirmed_at || ""}"
+               data-duration-sec="${t.duration_sec ?? ""}">${formatSec(sec)}</div>
         </div>
         <div class="title">${t.station} — ${t.status}</div>
         <div class="desc">${t.description || ""}</div>
@@ -736,8 +785,6 @@ async function loadMonitor() {
   sb.channel("tickets_monitor")
     .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
     .subscribe();
-
-  setInterval(render, 2000);
 }
 
 // ====== PARTS / STOCK SCREEN (EDITABLE) ======
@@ -790,24 +837,16 @@ async function loadPartsScreen() {
   }
 
   async function fetchParts() {
-    // Join stock with part info:
-    // stock(part_id, qty, min_qty, location) + spare_parts(id, part_no, part_name, uom, is_active)
-    let q = sb
+    const { data, error } = await sb
       .from("stock")
       .select("qty,min_qty,location, spare_parts(id,part_no,part_name,uom,is_active)")
       .order("qty", { ascending: true });
 
-    const { data, error } = await q;
     if (error) { console.error(error); return []; }
 
     let rows = (data || [])
-      .map(r => ({
-        qty: r.qty,
-        min_qty: r.min_qty,
-        location: r.location,
-        part: r.spare_parts
-      }))
-      .filter(x => x.part); // safety
+      .map(r => ({ qty: r.qty, min_qty: r.min_qty, location: r.location, part: r.spare_parts }))
+      .filter(x => x.part);
 
     if (state.onlyActive) rows = rows.filter(x => x.part.is_active !== false);
 
@@ -819,7 +858,6 @@ async function loadPartsScreen() {
       );
     }
 
-    // sort: low stock first then by part_no
     rows.sort((a, b) => {
       const aLow = Number(a.qty ?? 0) <= Number(a.min_qty ?? 0) ? 0 : 1;
       const bLow = Number(b.qty ?? 0) <= Number(b.min_qty ?? 0) ? 0 : 1;
@@ -869,29 +907,22 @@ async function loadPartsScreen() {
       if (!Number.isFinite(qty) || qty < 0) { alert("Qty must be 0 or more."); return; }
       if (!Number.isFinite(min_qty) || min_qty < 0) { alert("Min Qty must be 0 or more."); return; }
 
-      try {
-        // 1) insert part
-        const { data: inserted, error: pErr } = await sb
-          .from("spare_parts")
-          .insert({ part_no, part_name, uom, is_active: true })
-          .select("id")
-          .single();
+      const { data: inserted, error: pErr } = await sb
+        .from("spare_parts")
+        .insert({ part_no, part_name, uom, is_active: true })
+        .select("id")
+        .single();
 
-        if (pErr) { console.error(pErr); alert(pErr.message); return; }
+      if (pErr) { console.error(pErr); alert(pErr.message); return; }
 
-        // 2) insert stock (must exist)
-        const { error: sErr } = await sb
-          .from("stock")
-          .insert({ part_id: inserted.id, qty, min_qty, location: location || null });
+      const { error: sErr } = await sb
+        .from("stock")
+        .insert({ part_id: inserted.id, qty, min_qty, location: location || null });
 
-        if (sErr) { console.error(sErr); alert(sErr.message); return; }
+      if (sErr) { console.error(sErr); alert(sErr.message); return; }
 
-        modal.close();
-        render();
-      } catch (e) {
-        console.error(e);
-        alert(e?.message || e);
-      }
+      modal.close();
+      render();
     };
   }
 
@@ -918,7 +949,7 @@ async function loadPartsScreen() {
               <input id="is_active" type="checkbox" ${p.is_active === false ? "" : "checked"} />
               Active
             </label>
-            <div style="opacity:.7;">(Deactivate to hide from parts selection, history stays.)</div>
+            <div style="opacity:.7;">(Deactivate hides from selection, history stays.)</div>
           </div>
         </div>
 
@@ -944,27 +975,20 @@ async function loadPartsScreen() {
       if (!Number.isFinite(qty) || qty < 0) { alert("Qty must be 0 or more."); return; }
       if (!Number.isFinite(min_qty) || min_qty < 0) { alert("Min Qty must be 0 or more."); return; }
 
-      try {
-        const { error: pErr } = await sb
-          .from("spare_parts")
-          .update({ part_name, uom, is_active })
-          .eq("id", p.id);
+      const { error: pErr } = await sb
+        .from("spare_parts")
+        .update({ part_name, uom, is_active })
+        .eq("id", p.id);
+      if (pErr) { console.error(pErr); alert(pErr.message); return; }
 
-        if (pErr) { console.error(pErr); alert(pErr.message); return; }
+      const { error: sErr } = await sb
+        .from("stock")
+        .update({ qty, min_qty, location: location || null })
+        .eq("part_id", p.id);
+      if (sErr) { console.error(sErr); alert(sErr.message); return; }
 
-        const { error: sErr } = await sb
-          .from("stock")
-          .update({ qty, min_qty, location: location || null })
-          .eq("part_id", p.id);
-
-        if (sErr) { console.error(sErr); alert(sErr.message); return; }
-
-        modal.close();
-        render();
-      } catch (e) {
-        console.error(e);
-        alert(e?.message || e);
-      }
+      modal.close();
+      render();
     };
   }
 
@@ -1047,7 +1071,6 @@ async function loadPartsScreen() {
       editBtn.onclick = () => openEditModal(r);
 
       actions.appendChild(editBtn);
-
       listEl.appendChild(card);
     });
   }
@@ -1060,7 +1083,6 @@ async function loadPartsScreen() {
 
   render();
 
-  // live updates (parts + stock)
   sb.channel("parts_live_spare_parts")
     .on("postgres_changes", { event: "*", schema: "public", table: "spare_parts" }, render)
     .subscribe();
@@ -1068,7 +1090,4 @@ async function loadPartsScreen() {
   sb.channel("parts_live_stock")
     .on("postgres_changes", { event: "*", schema: "public", table: "stock" }, render)
     .subscribe();
-
-  setInterval(render, 5000);
 }
-
