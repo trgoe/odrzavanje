@@ -9,14 +9,9 @@ console.log("maintenance app.js loaded");
 
 // ====== CONFIG ======
 const SUPABASE_URL = "https://hfyvjtaumvmaqeqkmiyk.supabase.co";
-const SUPABASE_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmVhc2UiLCJyZWYiOiJoZnl2anRhdW12bWFxZXFrbWl5ayIsInJvbGUiOiJhbm9uIiwiaWF0IjoxNzcxMjQ4MTU5LCJleHAiOjIwODY4MjQxNTl9.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
-
+const SUPABASE_KEY = "YOUR_ANON_KEY_HERE"; // <-- keep yours
 const YELLOW_AFTER_MIN = 5;
 const RED_AFTER_MIN = 10;
-
-// Poll fallback (in case Realtime is not enabled for tables)
-const POLL_MS = 3000;
 
 // ====== INIT ======
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -66,7 +61,6 @@ function calcSeconds(t) {
   if (!startD) return null;
   const start = startD.getTime();
 
-  // frozen duration
   if (t.duration_sec != null && Number.isFinite(Number(t.duration_sec))) {
     return Number(t.duration_sec);
   }
@@ -74,7 +68,6 @@ function calcSeconds(t) {
   const st = String(t.status || "").toUpperCase();
   let stopD = null;
 
-  // stop time preference: confirmed > done
   if ((st === "CONFIRMED" || st === "REOPENED") && t.confirmed_at) stopD = parseTs(t.confirmed_at);
   if (!stopD && (st === "DONE" || st === "CONFIRMED" || st === "REOPENED") && t.done_at) stopD = parseTs(t.done_at);
 
@@ -90,7 +83,6 @@ function secondsFromDataset(el) {
   const start = parseTs(createdAt)?.getTime();
   if (!start) return null;
 
-  // frozen duration if present
   const dur = el.dataset.durationSec;
   if (dur != null && dur !== "" && Number.isFinite(Number(dur))) {
     return Number(dur);
@@ -115,7 +107,6 @@ function updateTimersOnly() {
   });
 }
 
-// One global ticker for any screen that has timer elements
 if (window.__MAINT_TIMER_INTERVAL) clearInterval(window.__MAINT_TIMER_INTERVAL);
 window.__MAINT_TIMER_INTERVAL = setInterval(updateTimersOnly, 1000);
 
@@ -150,7 +141,7 @@ async function findPartByNo(partNo) {
     .eq("part_no", partNo)
     .maybeSingle();
   if (error) throw error;
-  return data; // null if not found
+  return data;
 }
 
 async function loadPartsForTicket(ticketId) {
@@ -177,12 +168,10 @@ function partsListHtml(partsRows) {
 
 // ====== ROUTER + CLEANUP ======
 async function cleanupActive() {
-  // stop fallback polling timers
   if (window.__linePoll) { clearInterval(window.__linePoll); window.__linePoll = null; }
   if (window.__maintenancePoll) { clearInterval(window.__maintenancePoll); window.__maintenancePoll = null; }
   if (window.__monitorPoll) { clearInterval(window.__monitorPoll); window.__monitorPoll = null; }
 
-  // remove realtime channels
   if (window.__lineChannel) { try { await sb.removeChannel(window.__lineChannel); } catch (e) {} window.__lineChannel = null; }
   if (window.__maintenanceChannel) { try { await sb.removeChannel(window.__maintenanceChannel); } catch (e) {} window.__maintenanceChannel = null; }
   if (window.__monitorChannel) { try { await sb.removeChannel(window.__monitorChannel); } catch (e) {} window.__monitorChannel = null; }
@@ -192,7 +181,6 @@ async function cleanupActive() {
 
 async function router() {
   await cleanupActive();
-
   const r = location.hash || "#maintenance";
   if (r.startsWith("#line/")) return loadLine(r.split("/")[1]);
   if (r.startsWith("#monitor")) return loadMonitor();
@@ -228,7 +216,6 @@ async function loadLine(line) {
   const stationsEl = document.getElementById("stations");
   const myEl = document.getElementById("myTickets");
 
-  // Load stations
   const { data: stations, error: stErr } = await sb
     .from("stations")
     .select("*")
@@ -335,26 +322,6 @@ async function loadLine(line) {
     }
   }
 
-  // Debounce + prevent overlapping refreshes (important when realtime fires bursts)
-  let refreshInFlight = false;
-  let refreshQueued = false;
-  let refreshTimer = null;
-
-  async function safeRefresh() {
-    if (refreshInFlight) { refreshQueued = true; return; }
-    refreshInFlight = true;
-    try { await refreshMy(); }
-    finally {
-      refreshInFlight = false;
-      if (refreshQueued) { refreshQueued = false; safeRefresh(); }
-    }
-  }
-
-  function scheduleRefresh() {
-    clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(safeRefresh, 150);
-  }
-
   function openCreateTicketModal(line, station) {
     const modal = showModal(`
       <div class="card" style="width:min(560px,92vw);">
@@ -406,8 +373,7 @@ async function loadLine(line) {
         alert("Failed to create ticket");
       } else {
         modal.close();
-        // ✅ instant local update (so operator sees it immediately)
-        scheduleRefresh();
+        refreshMy(); // ✅ instant local update
       }
     };
   }
@@ -415,7 +381,27 @@ async function loadLine(line) {
   // initial load
   await refreshMy();
 
-  // Realtime only for THIS line + poll fallback
+  // Debounce + prevent overlapping refreshes
+  let refreshInFlight = false;
+  let refreshQueued = false;
+  let refreshTimer = null;
+
+  async function safeRefresh() {
+    if (refreshInFlight) { refreshQueued = true; return; }
+    refreshInFlight = true;
+    try { await refreshMy(); }
+    finally {
+      refreshInFlight = false;
+      if (refreshQueued) { refreshQueued = false; safeRefresh(); }
+    }
+  }
+
+  function scheduleRefresh() {
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(safeRefresh, 150);
+  }
+
+  // Realtime only for THIS line
   window.__lineChannel = sb
     .channel(`line_${line}_tickets`)
     .on(
@@ -425,7 +411,8 @@ async function loadLine(line) {
     )
     .subscribe();
 
-  window.__linePoll = setInterval(scheduleRefresh, POLL_MS);
+  // fallback poll (handles cases where realtime doesn't fire)
+  window.__linePoll = setInterval(scheduleRefresh, 3000);
 }
 
 // ====== MAINTENANCE BOARD ======
@@ -765,23 +752,15 @@ async function loadMaintenance() {
   syncDateInputs();
   await render();
 
-  // Realtime + poll fallback
-  let maintTimer = null;
-  function scheduleMaintRender() {
-    clearTimeout(maintTimer);
-    maintTimer = setTimeout(render, 150);
-  }
-
   window.__maintenanceChannel = sb
     .channel("tickets_maintenance")
-    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, scheduleMaintRender)
+    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
     .subscribe();
 
-  window.__maintenancePoll = setInterval(scheduleMaintRender, POLL_MS);
+  window.__maintenancePoll = setInterval(render, 3000);
 
   searchEl.addEventListener("input", render);
   lineEl.addEventListener("change", render);
-
   presetEl.addEventListener("change", () => { syncDateInputs(); render(); });
   fromEl.addEventListener("change", () => { presetEl.value = "custom"; syncDateInputs(); render(); });
   toEl.addEventListener("change", () => { presetEl.value = "custom"; syncDateInputs(); render(); });
@@ -847,19 +826,12 @@ async function loadMonitor() {
 
   await render();
 
-  // Realtime + poll fallback
-  let monTimer = null;
-  function scheduleMon() {
-    clearTimeout(monTimer);
-    monTimer = setTimeout(render, 150);
-  }
-
   window.__monitorChannel = sb
     .channel("tickets_monitor")
-    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, scheduleMon)
+    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
     .subscribe();
 
-  window.__monitorPoll = setInterval(scheduleMon, POLL_MS);
+  window.__monitorPoll = setInterval(render, 3000);
 }
 
 // ====== PARTS / STOCK SCREEN (EDITABLE) ======
@@ -1169,5 +1141,5 @@ async function loadPartsScreen() {
     .subscribe();
 }
 
-// ====== START APP ======
+// ====== START ======
 router();
