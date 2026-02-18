@@ -1,5 +1,3 @@
-
-You said:
 console.log("maintenance app.js loaded");
 
 // ====== CONFIG ======
@@ -1091,3 +1089,4 @@ async function loadPartsScreen() {
     .on("postgres_changes", { event: "*", schema: "public", table: "stock" }, render)
     .subscribe();
 }
+
