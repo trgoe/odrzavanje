@@ -554,6 +554,7 @@ async function loadLine(line) {
         modal.close();
       }
     };
+  }
 }
 
 // ====== MAINTENANCE BOARD ======
@@ -1361,4 +1362,5 @@ async function loadPartsScreen() {
 
   activeChannels.push(ch1, ch2);
 }
+
 
