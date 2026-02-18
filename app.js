@@ -4,7 +4,8 @@ console.log("maintenance app.js loaded");
 // IMPORTANT: Use the URL + ANON PUBLIC KEY from the SAME Supabase project:
 // Supabase Dashboard → Settings → API
 const SUPABASE_URL = "https://hfyvjtaumvmaqeqkmiyk.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhmeXZqdGF1bXZtYXFlcWttaXlrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEyNDgxNTksImV4cCI6MjA4NjgyNDE1OX0.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
+const SUPABASE_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhbm9uIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEyNDgxNTksImV4cCI6MjA4NjgyNDE1OX0.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
 
 const YELLOW_AFTER_MIN = 5;
 const RED_AFTER_MIN = 10;
@@ -12,7 +13,9 @@ const RED_AFTER_MIN = 10;
 // ====== INIT ======
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
-const route = location.hash || "#maintenance";
+
+// Keep track of active realtime channel so we can unsubscribe when switching screens
+let activeRealtimeChannel = null;
 
 // ====== TIME HELPERS ======
 function parseTs(ts) {
@@ -68,7 +71,8 @@ function calcSeconds(t) {
 
   // stop time preference: confirmed > done
   if ((st === "CONFIRMED" || st === "REOPENED") && t.confirmed_at) stopD = parseTs(t.confirmed_at);
-  if (!stopD && (st === "DONE" || st === "CONFIRMED" || st === "REOPENED") && t.done_at) stopD = parseTs(t.done_at);
+  if (!stopD && (st === "DONE" || st === "CONFIRMED" || st === "REOPENED") && t.done_at)
+    stopD = parseTs(t.done_at);
 
   if (stopD) return Math.max(0, Math.floor((stopD.getTime() - start) / 1000));
   return Math.max(0, Math.floor((Date.now() - start) / 1000));
@@ -94,7 +98,8 @@ function secondsFromDataset(el) {
 
   let stop = null;
   if ((status === "CONFIRMED" || status === "REOPENED") && confAt) stop = parseTs(confAt)?.getTime();
-  if (!stop && (status === "DONE" || status === "CONFIRMED" || status === "REOPENED") && doneAt) stop = parseTs(doneAt)?.getTime();
+  if (!stop && (status === "DONE" || status === "CONFIRMED" || status === "REOPENED") && doneAt)
+    stop = parseTs(doneAt)?.getTime();
 
   if (stop) return Math.max(0, Math.floor((stop - start) / 1000));
   return Math.max(0, Math.floor((Date.now() - start) / 1000));
@@ -115,8 +120,12 @@ function escCsv(v) {
   const s = String(v).replace(/"/g, '""');
   return /[",\n]/.test(s) ? `"${s}"` : s;
 }
-function pad2(n) { return String(n).padStart(2, "0"); }
-function toDateInputValue(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+function toDateInputValue(d) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
 
 // ====== MODAL HELPER ======
 function showModal(innerHtml) {
@@ -150,7 +159,10 @@ async function loadPartsForTicket(ticketId) {
     .eq("ticket_id", ticketId)
     .order("created_at", { ascending: true });
 
-  if (error) { console.error(error); return []; }
+  if (error) {
+    console.error(error);
+    return [];
+  }
   return data || [];
 }
 
@@ -158,7 +170,7 @@ function partsListHtml(partsRows) {
   if (!partsRows || partsRows.length === 0) return "";
   const lines = partsRows.map((r) => {
     const p = r.spare_parts || {};
-    const name = p.part_no ? `${p.part_no} — ${p.part_name || ""}` : (p.part_name || "Part");
+    const name = p.part_no ? `${p.part_no} — ${p.part_name || ""}` : p.part_name || "Part";
     const uom = p.uom || "";
     return `
       <div class="meta">
@@ -171,7 +183,20 @@ function partsListHtml(partsRows) {
 }
 
 // ====== ROUTING ======
+function cleanupRealtime() {
+  if (activeRealtimeChannel) {
+    try {
+      sb.removeChannel(activeRealtimeChannel);
+    } catch (e) {
+      // ignore
+    }
+    activeRealtimeChannel = null;
+  }
+}
+
 function routeTo() {
+  cleanupRealtime();
+
   const r = location.hash || "#maintenance";
   if (r.startsWith("#line/")) loadLine(r.split("/")[1]);
   else if (r.startsWith("#monitor")) loadMonitor();
@@ -228,6 +253,129 @@ async function loadLine(line) {
     stationsEl.appendChild(btn);
   });
 
+  // ---- Diff-render caches (prevents flash & heavy re-render) ----
+  const cardById = new Map(); // ticketId -> card element
+  const snapById = new Map(); // ticketId -> snapshot string (ticket fields)
+  const partsHtmlById = new Map(); // ticketId -> rendered parts html
+  const partsDirty = new Set(); // ticketId needing parts refetch
+
+  function ticketSnapshot(t) {
+    // Only include fields that affect the *card HTML* (not the timer text itself).
+    // Timer itself updates via updateTimersOnly() using data-* attributes.
+    return JSON.stringify({
+      id: t.id,
+      line: t.line,
+      station: t.station,
+      priority: t.priority,
+      status: t.status,
+      description: t.description,
+      issue_type: t.issue_type,
+      maint_comment: t.maint_comment,
+      operator_comment: t.operator_comment,
+      created_at: t.created_at,
+      done_at: t.done_at,
+      confirmed_at: t.confirmed_at,
+      duration_sec: t.duration_sec,
+    });
+  }
+
+  function needsParts(t) {
+    const st = String(t.status || "").toUpperCase();
+    // parts become relevant when maintenance closes ticket (DONE) and onward
+    return st === "DONE" || st === "CONFIRMED" || st === "REOPENED";
+  }
+
+  function buildCardHtml(t) {
+    const sec = calcSeconds(t);
+    const st = String(t.status || "").toUpperCase();
+
+    // parts placeholder is always present; we fill it async (and only when needed)
+    return `
+      <div class="cardTop">
+        <div class="pill">${t.station}</div>
+        <div class="timeBig"
+             data-timer="1"
+             data-created-at="${t.created_at || ""}"
+             data-status="${t.status || ""}"
+             data-done-at="${t.done_at || ""}"
+             data-confirmed-at="${t.confirmed_at || ""}"
+             data-duration-sec="${t.duration_sec ?? ""}">${formatSec(sec)}</div>
+      </div>
+
+      <div class="title">${t.priority} — ${t.status}</div>
+      <div class="desc">${t.description || ""}</div>
+
+      <div class="meta"><span style="opacity:.7;">Created</span><span>${fmtDateTime(t.created_at)}</span></div>
+      ${t.maint_comment ? `<div class="meta"><span style="opacity:.7;">Maint</span><span>${t.maint_comment}</span></div>` : ""}
+      ${t.operator_comment ? `<div class="meta"><span style="opacity:.7;">Operator</span><span>${t.operator_comment}</span></div>` : ""}
+
+      <div id="parts-${t.id}">${partsHtmlById.get(t.id) || ""}</div>
+
+      <div class="actions" id="opBtns-${t.id}" style="margin-top:10px;"></div>
+    `;
+  }
+
+  function renderActions(card, t) {
+    const btnBox = card.querySelector(`#opBtns-${t.id}`);
+    if (!btnBox) return;
+
+    btnBox.innerHTML = "";
+    const st = String(t.status || "").toUpperCase();
+
+    if (st === "DONE") {
+      const ok = document.createElement("button");
+      ok.className = "btnGreen";
+      ok.textContent = "CONFIRM";
+      ok.onclick = async () => {
+        const { error } = await sb
+          .from("tickets")
+          .update({ status: "CONFIRMED", confirmed_at: new Date().toISOString() })
+          .eq("id", t.id);
+        if (error) console.error(error);
+      };
+
+      const reopen = document.createElement("button");
+      reopen.className = "btnRed";
+      reopen.textContent = "NOT FIXED";
+      reopen.onclick = async () => {
+        const reason = prompt("Short reason (optional):", "Still not working");
+        const { error } = await sb
+          .from("tickets")
+          .update({
+            status: "REOPENED",
+            confirmed_at: new Date().toISOString(),
+            operator_comment: reason || null,
+            duration_sec: null,
+            done_at: null,
+          })
+          .eq("id", t.id);
+        if (error) console.error(error);
+      };
+
+      btnBox.appendChild(ok);
+      btnBox.appendChild(reopen);
+    } else {
+      btnBox.innerHTML = `<div style="opacity:.7;">Waiting for maintenance / in progress…</div>`;
+    }
+  }
+
+  async function updatePartsOnly(ticketId) {
+    // Only update if the card exists on screen
+    const card = cardById.get(ticketId);
+    if (!card) return;
+
+    // If not dirty, skip
+    if (!partsDirty.has(ticketId) && partsHtmlById.has(ticketId)) return;
+
+    const partsRows = await loadPartsForTicket(ticketId);
+    const html = partsListHtml(partsRows);
+    partsHtmlById.set(ticketId, html);
+    partsDirty.delete(ticketId);
+
+    const partsEl = card.querySelector(`#parts-${ticketId}`);
+    if (partsEl) partsEl.innerHTML = html;
+  }
+
   async function refreshMy() {
     const { data, error } = await sb
       .from("tickets")
@@ -238,79 +386,69 @@ async function loadLine(line) {
 
     if (error) console.error(error);
 
-    myEl.innerHTML = "";
+    const rows = data || [];
+    const seen = new Set(rows.map((t) => t.id));
 
-    for (const t of (data || [])) {
+    // Remove cards that disappeared from the top 30 list
+    for (const [id, el] of cardById.entries()) {
+      if (!seen.has(id)) {
+        el.remove();
+        cardById.delete(id);
+        snapById.delete(id);
+        // keep parts cache; harmless, but you can delete too if you want:
+        // partsHtmlById.delete(id);
+        partsDirty.delete(id);
+      }
+    }
+
+    // Render/update cards in correct order without nuking the whole container
+    const frag = document.createDocumentFragment();
+
+    for (const t of rows) {
       const sec = calcSeconds(t);
-      const partsRows = await loadPartsForTicket(t.id);
+      const snap = ticketSnapshot(t);
+      const existing = cardById.get(t.id);
 
-      const card = document.createElement("div");
-      card.className = `card ${urgencyClass(sec)}`;
+      if (!existing) {
+        const card = document.createElement("div");
+        card.className = `card ${urgencyClass(sec)}`;
+        card.innerHTML = buildCardHtml(t);
+        renderActions(card, t);
 
-      card.innerHTML = `
-        <div class="cardTop">
-          <div class="pill">${t.station}</div>
-          <div class="timeBig"
-               data-timer="1"
-               data-created-at="${t.created_at || ""}"
-               data-status="${t.status || ""}"
-               data-done-at="${t.done_at || ""}"
-               data-confirmed-at="${t.confirmed_at || ""}"
-               data-duration-sec="${t.duration_sec ?? ""}">${formatSec(sec)}</div>
-        </div>
+        cardById.set(t.id, card);
+        snapById.set(t.id, snap);
 
-        <div class="title">${t.priority} — ${t.status}</div>
-        <div class="desc">${t.description || ""}</div>
-
-        <div class="meta"><span style="opacity:.7;">Created</span><span>${fmtDateTime(t.created_at)}</span></div>
-        ${t.maint_comment ? `<div class="meta"><span style="opacity:.7;">Maint</span><span>${t.maint_comment}</span></div>` : ""}
-        ${t.operator_comment ? `<div class="meta"><span style="opacity:.7;">Operator</span><span>${t.operator_comment}</span></div>` : ""}
-        ${partsListHtml(partsRows)}
-
-        <div class="actions" id="opBtns-${t.id}" style="margin-top:10px;"></div>
-      `;
-
-      const btnBox = card.querySelector(`#opBtns-${t.id}`);
-      const st = String(t.status || "").toUpperCase();
-
-      if (st === "DONE") {
-        const ok = document.createElement("button");
-        ok.className = "btnGreen";
-        ok.textContent = "CONFIRM";
-        ok.onclick = async () => {
-          const { error } = await sb
-            .from("tickets")
-            .update({ status: "CONFIRMED", confirmed_at: new Date().toISOString() })
-            .eq("id", t.id);
-          if (error) console.error(error);
-        };
-
-        const reopen = document.createElement("button");
-        reopen.className = "btnRed";
-        reopen.textContent = "NOT FIXED";
-        reopen.onclick = async () => {
-          const reason = prompt("Short reason (optional):", "Still not working");
-          const { error } = await sb
-            .from("tickets")
-            .update({
-              status: "REOPENED",
-              confirmed_at: new Date().toISOString(),
-              operator_comment: reason || null,
-              duration_sec: null,
-              done_at: null,
-            })
-            .eq("id", t.id);
-          if (error) console.error(error);
-        };
-
-        btnBox.appendChild(ok);
-        btnBox.appendChild(reopen);
+        frag.appendChild(card);
       } else {
-        btnBox.innerHTML = `<div style="opacity:.7;">Waiting for maintenance / in progress…</div>`;
+        // Update class (urgency) even if other fields unchanged (because duration can cross thresholds)
+        existing.className = `card ${urgencyClass(sec)}`;
+
+        if (snapById.get(t.id) !== snap) {
+          existing.innerHTML = buildCardHtml(t);
+          renderActions(existing, t);
+          snapById.set(t.id, snap);
+        }
+
+        frag.appendChild(existing);
       }
 
-      myEl.appendChild(card);
+      // parts: fetch only when needed, and only when dirty / missing
+      if (needsParts(t)) {
+        if (!partsHtmlById.has(t.id) || partsDirty.has(t.id)) {
+          // do not await inside loop if you want it faster; but this is safe.
+          // We'll kick it off after DOM placement:
+          setTimeout(() => updatePartsOnly(t.id), 0);
+        }
+      } else {
+        // If ticket is not in DONE/CONFIRMED/REOPENED, don't show parts (and don't fetch)
+        const card = cardById.get(t.id);
+        const partsEl = card?.querySelector(`#parts-${t.id}`);
+        if (partsEl) partsEl.innerHTML = "";
+      }
     }
+
+    // Replace children with fragment (keeps elements; no flash)
+    myEl.replaceChildren(frag);
   }
 
   function openCreateTicketModal(line, station) {
@@ -347,7 +485,10 @@ async function loadLine(line) {
       const issue = modal.el.querySelector("#issue").value.trim();
       const desc = modal.el.querySelector("#desc").value.trim();
 
-      if (!desc) { alert("Description required."); return; }
+      if (!desc) {
+        alert("Description required.");
+        return;
+      }
 
       const { error } = await sb.from("tickets").insert({
         line,
@@ -368,16 +509,29 @@ async function loadLine(line) {
     };
   }
 
+  // initial render
   refreshMy();
 
-  sb.channel(`line_${line}_tickets`)
+  // Realtime-only (NO 2s polling)
+  const ch = sb
+    .channel(`line_${line}_live`)
     .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, (payload) => {
       if (payload.new?.line === line || payload.old?.line === line) refreshMy();
     })
+    .on("postgres_changes", { event: "*", schema: "public", table: "ticket_parts" }, (payload) => {
+      const tid = payload?.new?.ticket_id ?? payload?.old?.ticket_id;
+      if (tid) {
+        partsDirty.add(tid);
+        // Update only the parts area for that ticket (no full flash)
+        updatePartsOnly(tid);
+      } else {
+        // fallback
+        refreshMy();
+      }
+    })
     .subscribe();
 
-  // keep line view auto-refresh (simple and ok)
-  setInterval(refreshMy, 2000);
+  activeRealtimeChannel = ch;
 }
 
 // ====== MAINTENANCE BOARD ======
@@ -454,10 +608,12 @@ async function loadMaintenance() {
     const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 0, 0, 0, 0);
     const endOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
 
-    let from = null, to = null;
+    let from = null,
+      to = null;
 
     if (preset === "today") {
-      from = startOfToday; to = endOfToday;
+      from = startOfToday;
+      to = endOfToday;
     } else if (preset === "7" || preset === "30") {
       const days = Number(preset);
       from = new Date(startOfToday.getTime() - (days - 1) * 24 * 60 * 60 * 1000);
@@ -545,22 +701,28 @@ async function loadMaintenance() {
     doneBtn.textContent = "DONE";
     doneBtn.style.background = "#4caf50";
     doneBtn.style.color = "#fff";
-    doneBtn.disabled = (st !== "TAKEN" && st !== "REOPENED");
+    doneBtn.disabled = st !== "TAKEN" && st !== "REOPENED";
 
     doneBtn.onclick = async () => {
       const comment = prompt("Short fix comment (required):", "Fixed / adjusted / replaced…");
-      if (!comment || !comment.trim()) { alert("Comment required."); return; }
+      if (!comment || !comment.trim()) {
+        alert("Comment required.");
+        return;
+      }
 
       // optional parts: PARTNO=QTY,PARTNO=QTY
       const raw = prompt("Parts used? Format: PARTNO=QTY,PARTNO=QTY (leave empty if none)", "");
 
       try {
         if (raw && raw.trim()) {
-          const pairs = raw.split(",").map(x => x.trim()).filter(Boolean);
+          const pairs = raw
+            .split(",")
+            .map((x) => x.trim())
+            .filter(Boolean);
           const items = [];
 
           for (const p of pairs) {
-            const [noRaw, qtyStrRaw] = p.split("=").map(x => x.trim());
+            const [noRaw, qtyStrRaw] = p.split("=").map((x) => x.trim());
             const no = (noRaw || "").toUpperCase();
             const qty = Number(qtyStrRaw);
 
@@ -634,37 +796,39 @@ async function loadMaintenance() {
     if (state.line !== "ALL") q = q.eq("line", state.line);
 
     const { data, error } = await q;
-    if (error) { console.error(error); return; }
+    if (error) {
+      console.error(error);
+      return;
+    }
 
     let rows = data || [];
 
     if (state.q) {
       const needle = state.q;
-      rows = rows.filter(t =>
-        String(t.station || "").toLowerCase().includes(needle) ||
-        String(t.description || "").toLowerCase().includes(needle)
+      rows = rows.filter(
+        (t) =>
+          String(t.station || "").toLowerCase().includes(needle) ||
+          String(t.description || "").toLowerCase().includes(needle)
       );
     }
 
     const by = { NEW: [], TAKEN: [], DONE: [] };
-    rows.forEach(t => {
+    rows.forEach((t) => {
       const st = String(t.status || "").toUpperCase();
       if (st === "TAKEN") by.TAKEN.push(t);
       else if (st === "DONE") by.DONE.push(t);
       else by.NEW.push(t);
     });
 
-    ["NEW", "TAKEN", "DONE"].forEach(k =>
-      by[k].sort((a, b) => (calcSeconds(b) || 0) - (calcSeconds(a) || 0))
-    );
+    ["NEW", "TAKEN", "DONE"].forEach((k) => by[k].sort((a, b) => (calcSeconds(b) || 0) - (calcSeconds(a) || 0)));
 
     colNEW.innerHTML = "";
     colTAK.innerHTML = "";
     colDON.innerHTML = "";
 
-    by.NEW.forEach(t => colNEW.appendChild(makeCard(t)));
-    by.TAKEN.forEach(t => colTAK.appendChild(makeCard(t)));
-    by.DONE.forEach(t => colDON.appendChild(makeCard(t)));
+    by.NEW.forEach((t) => colNEW.appendChild(makeCard(t)));
+    by.TAKEN.forEach((t) => colTAK.appendChild(makeCard(t)));
+    by.DONE.forEach((t) => colDON.appendChild(makeCard(t)));
 
     countNEW.textContent = by.NEW.length;
     countTAK.textContent = by.TAKEN.length;
@@ -679,7 +843,9 @@ async function loadMaintenance() {
 
     let q = sb
       .from("tickets")
-      .select("id,line,station,priority,issue_type,description,status,created_at,taken_at,done_at,confirmed_at,taken_by,maint_comment,operator_comment,duration_sec")
+      .select(
+        "id,line,station,priority,issue_type,description,status,created_at,taken_at,done_at,confirmed_at,taken_by,maint_comment,operator_comment,duration_sec"
+      )
       .gte("created_at", fromISO)
       .lte("created_at", toISO)
       .order("created_at", { ascending: true });
@@ -687,19 +853,40 @@ async function loadMaintenance() {
     if (state.line && state.line !== "ALL") q = q.eq("line", state.line);
 
     const { data, error } = await q;
-    if (error) { console.error(error); alert("Export failed"); return; }
+    if (error) {
+      console.error(error);
+      alert("Export failed");
+      return;
+    }
 
     let rows = data || [];
     if (state.q) {
       const needle = state.q;
-      rows = rows.filter(t =>
-        String(t.station || "").toLowerCase().includes(needle) ||
-        String(t.description || "").toLowerCase().includes(needle)
+      rows = rows.filter(
+        (t) =>
+          String(t.station || "").toLowerCase().includes(needle) ||
+          String(t.description || "").toLowerCase().includes(needle)
       );
     }
 
-    const cols = ["id","line","station","priority","issue_type","description","status","created_at","taken_at","done_at","confirmed_at","taken_by","maint_comment","operator_comment","duration_sec"];
-    const csv = [cols.join(","), ...rows.map(r => cols.map(c => escCsv(r[c])).join(","))].join("\n");
+    const cols = [
+      "id",
+      "line",
+      "station",
+      "priority",
+      "issue_type",
+      "description",
+      "status",
+      "created_at",
+      "taken_at",
+      "done_at",
+      "confirmed_at",
+      "taken_by",
+      "maint_comment",
+      "operator_comment",
+      "duration_sec",
+    ];
+    const csv = [cols.join(","), ...rows.map((r) => cols.map((c) => escCsv(r[c])).join(","))].join("\n");
 
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -719,16 +906,30 @@ async function loadMaintenance() {
   render();
 
   // Realtime updates only (NO 2s polling → stops the “refresh” feeling)
-  sb.channel("tickets_maintenance")
+  const ch = sb
+    .channel("tickets_maintenance")
     .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
     .subscribe();
+
+  activeRealtimeChannel = ch;
 
   searchEl.addEventListener("input", render);
   lineEl.addEventListener("change", render);
 
-  presetEl.addEventListener("change", () => { syncDateInputs(); render(); });
-  fromEl.addEventListener("change", () => { presetEl.value = "custom"; syncDateInputs(); render(); });
-  toEl.addEventListener("change", () => { presetEl.value = "custom"; syncDateInputs(); render(); });
+  presetEl.addEventListener("change", () => {
+    syncDateInputs();
+    render();
+  });
+  fromEl.addEventListener("change", () => {
+    presetEl.value = "custom";
+    syncDateInputs();
+    render();
+  });
+  toEl.addEventListener("change", () => {
+    presetEl.value = "custom";
+    syncDateInputs();
+    render();
+  });
 }
 
 // ====== MONITOR ======
@@ -756,10 +957,13 @@ async function loadMonitor() {
       .neq("status", "CONFIRMED")
       .order("created_at", { ascending: true });
 
-    if (error) { console.error(error); return; }
+    if (error) {
+      console.error(error);
+      return;
+    }
 
     const items = (data || [])
-      .map(t => ({ t, sec: calcSeconds(t) }))
+      .map((t) => ({ t, sec: calcSeconds(t) }))
       .sort((a, b) => (b.sec || 0) - (a.sec || 0));
 
     rowsEl.innerHTML = "";
@@ -791,9 +995,12 @@ async function loadMonitor() {
 
   render();
 
-  sb.channel("tickets_monitor")
+  const ch = sb
+    .channel("tickets_monitor")
     .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
     .subscribe();
+
+  activeRealtimeChannel = ch;
 }
 
 // ====== PARTS / STOCK SCREEN (EDITABLE) ======
@@ -835,7 +1042,7 @@ async function loadPartsScreen() {
 
   function readState() {
     state.q = (searchEl.value || "").trim().toLowerCase();
-    state.onlyActive = (activeEl.value === "active");
+    state.onlyActive = activeEl.value === "active";
   }
 
   function lowStockClass(qty, min) {
@@ -851,19 +1058,23 @@ async function loadPartsScreen() {
       .select("qty,min_qty,location, spare_parts(id,part_no,part_name,uom,is_active)")
       .order("qty", { ascending: true });
 
-    if (error) { console.error(error); return []; }
+    if (error) {
+      console.error(error);
+      return [];
+    }
 
     let rows = (data || [])
-      .map(r => ({ qty: r.qty, min_qty: r.min_qty, location: r.location, part: r.spare_parts }))
-      .filter(x => x.part);
+      .map((r) => ({ qty: r.qty, min_qty: r.min_qty, location: r.location, part: r.spare_parts }))
+      .filter((x) => x.part);
 
-    if (state.onlyActive) rows = rows.filter(x => x.part.is_active !== false);
+    if (state.onlyActive) rows = rows.filter((x) => x.part.is_active !== false);
 
     if (state.q) {
       const n = state.q;
-      rows = rows.filter(x =>
-        String(x.part.part_no || "").toLowerCase().includes(n) ||
-        String(x.part.part_name || "").toLowerCase().includes(n)
+      rows = rows.filter(
+        (x) =>
+          String(x.part.part_no || "").toLowerCase().includes(n) ||
+          String(x.part.part_name || "").toLowerCase().includes(n)
       );
     }
 
@@ -912,23 +1123,34 @@ async function loadPartsScreen() {
       const min_qty = Number(modal.el.querySelector("#min_qty").value || 0);
       const location = modal.el.querySelector("#location").value.trim();
 
-      if (!part_no || !part_name) { alert("Part No and Part name are required."); return; }
-      if (!Number.isFinite(qty) || qty < 0) { alert("Qty must be 0 or more."); return; }
-      if (!Number.isFinite(min_qty) || min_qty < 0) { alert("Min Qty must be 0 or more."); return; }
+      if (!part_no || !part_name) {
+        alert("Part No and Part name are required.");
+        return;
+      }
+      if (!Number.isFinite(qty) || qty < 0) {
+        alert("Qty must be 0 or more.");
+        return;
+      }
+      if (!Number.isFinite(min_qty) || min_qty < 0) {
+        alert("Min Qty must be 0 or more.");
+        return;
+      }
 
-      const { data: inserted, error: pErr } = await sb
-        .from("spare_parts")
-        .insert({ part_no, part_name, uom, is_active: true })
-        .select("id")
-        .single();
+      const { data: inserted, error: pErr } = await sb.from("spare_parts").insert({ part_no, part_name, uom, is_active: true }).select("id").single();
 
-      if (pErr) { console.error(pErr); alert(pErr.message); return; }
+      if (pErr) {
+        console.error(pErr);
+        alert(pErr.message);
+        return;
+      }
 
-      const { error: sErr } = await sb
-        .from("stock")
-        .insert({ part_id: inserted.id, qty, min_qty, location: location || null });
+      const { error: sErr } = await sb.from("stock").insert({ part_id: inserted.id, qty, min_qty, location: location || null });
 
-      if (sErr) { console.error(sErr); alert(sErr.message); return; }
+      if (sErr) {
+        console.error(sErr);
+        alert(sErr.message);
+        return;
+      }
 
       modal.close();
       render();
@@ -980,21 +1202,32 @@ async function loadPartsScreen() {
       const location = modal.el.querySelector("#location").value.trim();
       const is_active = !!modal.el.querySelector("#is_active").checked;
 
-      if (!part_name) { alert("Part name is required."); return; }
-      if (!Number.isFinite(qty) || qty < 0) { alert("Qty must be 0 or more."); return; }
-      if (!Number.isFinite(min_qty) || min_qty < 0) { alert("Min Qty must be 0 or more."); return; }
+      if (!part_name) {
+        alert("Part name is required.");
+        return;
+      }
+      if (!Number.isFinite(qty) || qty < 0) {
+        alert("Qty must be 0 or more.");
+        return;
+      }
+      if (!Number.isFinite(min_qty) || min_qty < 0) {
+        alert("Min Qty must be 0 or more.");
+        return;
+      }
 
-      const { error: pErr } = await sb
-        .from("spare_parts")
-        .update({ part_name, uom, is_active })
-        .eq("id", p.id);
-      if (pErr) { console.error(pErr); alert(pErr.message); return; }
+      const { error: pErr } = await sb.from("spare_parts").update({ part_name, uom, is_active }).eq("id", p.id);
+      if (pErr) {
+        console.error(pErr);
+        alert(pErr.message);
+        return;
+      }
 
-      const { error: sErr } = await sb
-        .from("stock")
-        .update({ qty, min_qty, location: location || null })
-        .eq("part_id", p.id);
-      if (sErr) { console.error(sErr); alert(sErr.message); return; }
+      const { error: sErr } = await sb.from("stock").update({ qty, min_qty, location: location || null }).eq("part_id", p.id);
+      if (sErr) {
+        console.error(sErr);
+        alert(sErr.message);
+        return;
+      }
 
       modal.close();
       render();
@@ -1005,10 +1238,10 @@ async function loadPartsScreen() {
     readState();
     const rows = await fetchParts();
 
-    const cols = ["part_no","part_name","uom","qty","min_qty","location","is_active"];
+    const cols = ["part_no", "part_name", "uom", "qty", "min_qty", "location", "is_active"];
     const csv = [
       cols.join(","),
-      ...rows.map(r => {
+      ...rows.map((r) => {
         const p = r.part;
         const obj = {
           part_no: p.part_no,
@@ -1017,17 +1250,17 @@ async function loadPartsScreen() {
           qty: r.qty,
           min_qty: r.min_qty,
           location: r.location,
-          is_active: p.is_active
+          is_active: p.is_active,
         };
-        return cols.map(c => escCsv(obj[c])).join(",");
-      })
+        return cols.map((c) => escCsv(obj[c])).join(",");
+      }),
     ].join("\n");
 
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `spare_parts_${new Date().toISOString().slice(0,10)}.csv`;
+    a.download = `spare_parts_${new Date().toISOString().slice(0, 10)}.csv`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -1044,7 +1277,7 @@ async function loadPartsScreen() {
       return;
     }
 
-    rows.forEach(r => {
+    rows.forEach((r) => {
       const p = r.part;
       const qty = Number(r.qty ?? 0);
       const minq = Number(r.min_qty ?? 0);
@@ -1067,7 +1300,7 @@ async function loadPartsScreen() {
         </div>
 
         <div class="meta">
-          <div style="opacity:.75;">${p.is_active === false ? "INACTIVE" : (low ? "LOW STOCK" : "OK")}</div>
+          <div style="opacity:.75;">${p.is_active === false ? "INACTIVE" : low ? "LOW STOCK" : "OK"}</div>
         </div>
 
         <div class="actions" style="margin-top:10px;"></div>
@@ -1092,14 +1325,13 @@ async function loadPartsScreen() {
 
   render();
 
-  sb.channel("parts_live_spare_parts")
+  // Keep both channels, but store only one "activeRealtimeChannel" for cleanup.
+  // We'll bundle both into one combined channel so cleanup works cleanly.
+  const ch = sb
+    .channel("parts_live_all")
     .on("postgres_changes", { event: "*", schema: "public", table: "spare_parts" }, render)
-    .subscribe();
-
-  sb.channel("parts_live_stock")
     .on("postgres_changes", { event: "*", schema: "public", table: "stock" }, render)
     .subscribe();
+
+  activeRealtimeChannel = ch;
 }
-
-
-
