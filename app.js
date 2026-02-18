@@ -1,53 +1,19 @@
-/* ===========================
-   Maintenance App (No Flicker)
-   - Single active screen subscription (auto-unsub on route change)
-   - No setInterval(render, ...)
-   - Timers update locally every 1s (no refetch)
-   - Screens: #maintenance (default), #line/L1, #monitor, #parts
-   - CSV export with presets + custom date range
-   - Parts usage on DONE via RPC apply_ticket_parts()
-   =========================== */
 
+You said:
 console.log("maintenance app.js loaded");
 
 // ====== CONFIG ======
+// IMPORTANT: Use the URL + ANON PUBLIC KEY from the SAME Supabase project:
+// Supabase Dashboard → Settings → API
 const SUPABASE_URL = "https://hfyvjtaumvmaqeqkmiyk.supabase.co";
-const SUPABASE_KEY = "YOUR_ANON_KEY_HERE"; // <-- keep your real key here
-
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhmeXZqdGF1bXZtYXFlcWttaXlrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEyNDgxNTksImV4cCI6MjA4NjgyNDE1OX0.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
 const YELLOW_AFTER_MIN = 5;
 const RED_AFTER_MIN = 10;
 
 // ====== INIT ======
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
-
-// ====== SAFE SUBSCRIPTIONS (NO STACKING) ======
-let activeSubs = [];
-function clearSubs() {
-  for (const ch of activeSubs) {
-    try { sb.removeChannel(ch); } catch (e) {}
-  }
-  activeSubs = [];
-}
-function addSub(ch) { activeSubs.push(ch); }
-
-// ====== ROUTER ======
-function getRoute() {
-  return location.hash || "#maintenance";
-}
-
-function routeTo() {
-  const route = getRoute();
-  clearSubs();
-
-  if (route.startsWith("#line/")) loadLine(route.split("/")[1]);
-  else if (route.startsWith("#monitor")) loadMonitor();
-  else if (route.startsWith("#parts")) loadPartsScreen();
-  else loadMaintenance();
-}
-
-window.addEventListener("hashchange", routeTo);
-routeTo();
+const route = location.hash || "#maintenance";
 
 // ====== TIME HELPERS ======
 function parseTs(ts) {
@@ -77,7 +43,7 @@ function formatSec(sec) {
   if (sec == null) return "--:--";
   const m = Math.floor(sec / 60);
   const s = Math.max(0, sec % 60);
-  return `${m}:${String(s).padStart(2, "0")}`;
+  return ${m}:${String(s).padStart(2, "0")};
 }
 
 function urgencyClass(sec) {
@@ -93,6 +59,7 @@ function calcSeconds(t) {
   if (!startD) return null;
   const start = startD.getTime();
 
+  // frozen duration
   if (t.duration_sec != null && Number.isFinite(Number(t.duration_sec))) {
     return Number(t.duration_sec);
   }
@@ -100,6 +67,7 @@ function calcSeconds(t) {
   const st = String(t.status || "").toUpperCase();
   let stopD = null;
 
+  // stop time preference: confirmed > done
   if ((st === "CONFIRMED" || st === "REOPENED") && t.confirmed_at) stopD = parseTs(t.confirmed_at);
   if (!stopD && (st === "DONE" || st === "CONFIRMED" || st === "REOPENED") && t.done_at) stopD = parseTs(t.done_at);
 
@@ -115,8 +83,11 @@ function secondsFromDataset(el) {
   const start = parseTs(createdAt)?.getTime();
   if (!start) return null;
 
+  // frozen duration if present
   const dur = el.dataset.durationSec;
-  if (dur != null && dur !== "" && Number.isFinite(Number(dur))) return Number(dur);
+  if (dur != null && dur !== "" && Number.isFinite(Number(dur))) {
+    return Number(dur);
+  }
 
   const status = (el.dataset.status || "").toUpperCase();
   const doneAt = el.dataset.doneAt;
@@ -136,16 +107,17 @@ function updateTimersOnly() {
     el.textContent = formatSec(sec);
   });
 }
+// One global ticker for any screen that has timer elements
 setInterval(updateTimersOnly, 1000);
 
 // ====== CSV HELPERS ======
 function escCsv(v) {
   if (v == null) return "";
   const s = String(v).replace(/"/g, '""');
-  return /[",\n]/.test(s) ? `"${s}"` : s;
+  return /[",\n]/.test(s) ? "${s}" : s;
 }
 function pad2(n) { return String(n).padStart(2, "0"); }
-function toDateInputValue(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
+function toDateInputValue(d) { return ${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}; }
 
 // ====== MODAL HELPER ======
 function showModal(innerHtml) {
@@ -169,7 +141,7 @@ async function findPartByNo(partNo) {
     .eq("part_no", partNo)
     .maybeSingle();
   if (error) throw error;
-  return data;
+  return data; // null if not found
 }
 
 async function loadPartsForTicket(ticketId) {
@@ -187,16 +159,22 @@ function partsListHtml(partsRows) {
   if (!partsRows || partsRows.length === 0) return "";
   const lines = partsRows.map((r) => {
     const p = r.spare_parts || {};
-    const name = p.part_no ? `${p.part_no} — ${p.part_name || ""}` : (p.part_name || "Part");
+    const name = p.part_no ? ${p.part_no} — ${p.part_name || ""} : (p.part_name || "Part");
     const uom = p.uom || "";
-    return `<div class="meta"><span style="opacity:.7;">Part</span><span>${name} × <b>${r.qty_used}</b> ${uom}</span></div>`;
+    return <div class="meta"><span style="opacity:.7;">Part</span><span>${name} × <b>${r.qty_used}</b> ${uom}</span></div>;
   });
-  return `<div style="margin-top:8px;">${lines.join("")}</div>`;
+  return <div style="margin-top:8px;">${lines.join("")}</div>;
 }
+
+// ====== ROUTING ======
+if (route.startsWith("#line/")) loadLine(route.split("/")[1]);
+else if (route.startsWith("#monitor")) loadMonitor();
+else if (route.startsWith("#parts")) loadPartsScreen();
+else loadMaintenance();
 
 // ====== OPERATOR (LINE) ======
 async function loadLine(line) {
-  app.innerHTML = `
+  app.innerHTML = 
     <div class="header">LINE ${line} — Maintenance Call</div>
 
     <div class="topbar">
@@ -215,7 +193,7 @@ async function loadLine(line) {
       <div style="font-weight:900;margin-bottom:8px;">My tickets (latest)</div>
       <div id="myTickets" style="display:grid;gap:10px;"></div>
     </div>
-  `;
+  ;
 
   const stationsEl = document.getElementById("stations");
   const myEl = document.getElementById("myTickets");
@@ -233,68 +211,13 @@ async function loadLine(line) {
     const btn = document.createElement("button");
     btn.className = "btn btnBlue";
     btn.style.textAlign = "left";
-    btn.innerHTML = `
+    btn.innerHTML = 
       <div style="font-weight:1000;font-size:18px;">${s.station}</div>
       <div style="opacity:.8;font-size:12px;">Tap to create ticket</div>
-    `;
+    ;
     btn.onclick = () => openCreateTicketModal(line, s.station);
     stationsEl.appendChild(btn);
   });
-
-  function openCreateTicketModal(line, station) {
-    const modal = showModal(`
-      <div class="card" style="width:min(560px,92vw);">
-        <div style="font-weight:1000;font-size:20px;">New ticket — ${line} / ${station}</div>
-        <div style="height:10px;"></div>
-
-        <div style="display:flex;gap:10px;flex-wrap:wrap;">
-          <select id="prio" class="select" style="min-width:160px;">
-            <option value="LOW">LOW</option>
-            <option value="MED" selected>MED</option>
-            <option value="HIGH">HIGH</option>
-          </select>
-
-          <input id="issue" class="input" placeholder="Issue type (optional)" style="flex:1;min-width:180px;" />
-        </div>
-
-        <div style="height:10px;"></div>
-        <textarea id="desc" placeholder="Describe problem… (required)"></textarea>
-
-        <div style="height:10px;"></div>
-        <div style="display:flex;gap:10px;">
-          <button id="cancel" class="btn">Cancel</button>
-          <button id="send" class="btn btnBlue" style="flex:1;">SEND</button>
-        </div>
-      </div>
-    `);
-
-    modal.el.querySelector("#cancel").onclick = modal.close;
-
-    modal.el.querySelector("#send").onclick = async () => {
-      const prio = modal.el.querySelector("#prio").value;
-      const issue = modal.el.querySelector("#issue").value.trim();
-      const desc = modal.el.querySelector("#desc").value.trim();
-
-      if (!desc) { alert("Description required."); return; }
-
-      const { error } = await sb.from("tickets").insert({
-        line,
-        station,
-        priority: prio,
-        issue_type: issue || null,
-        description: desc,
-        status: "NEW",
-        created_at: new Date().toISOString(),
-      });
-
-      if (error) {
-        console.error(error);
-        alert("Failed to create ticket");
-      } else {
-        modal.close();
-      }
-    };
-  }
 
   async function refreshMy() {
     const { data, error } = await sb
@@ -307,14 +230,15 @@ async function loadLine(line) {
     if (error) console.error(error);
 
     myEl.innerHTML = "";
+
     for (const t of (data || [])) {
       const sec = calcSeconds(t);
       const partsRows = await loadPartsForTicket(t.id);
 
       const card = document.createElement("div");
-      card.className = `card ${urgencyClass(sec)}`;
+      card.className = card ${urgencyClass(sec)};
 
-      card.innerHTML = `
+      card.innerHTML = 
         <div class="cardTop">
           <div class="pill">${t.station}</div>
           <div class="timeBig"
@@ -330,14 +254,14 @@ async function loadLine(line) {
         <div class="desc">${t.description || ""}</div>
 
         <div class="meta"><span style="opacity:.7;">Created</span><span>${fmtDateTime(t.created_at)}</span></div>
-        ${t.maint_comment ? `<div class="meta"><span style="opacity:.7;">Maint</span><span>${t.maint_comment}</span></div>` : ""}
-        ${t.operator_comment ? `<div class="meta"><span style="opacity:.7;">Operator</span><span>${t.operator_comment}</span></div>` : ""}
+        ${t.maint_comment ? <div class="meta"><span style="opacity:.7;">Maint</span><span>${t.maint_comment}</span></div> : ""}
+        ${t.operator_comment ? <div class="meta"><span style="opacity:.7;">Operator</span><span>${t.operator_comment}</span></div> : ""}
         ${partsListHtml(partsRows)}
 
         <div class="actions" id="opBtns-${t.id}" style="margin-top:10px;"></div>
-      `;
+      ;
 
-      const btnBox = card.querySelector(`#opBtns-${t.id}`);
+      const btnBox = card.querySelector(#opBtns-${t.id});
       const st = String(t.status || "").toUpperCase();
 
       if (st === "DONE") {
@@ -373,29 +297,85 @@ async function loadLine(line) {
         btnBox.appendChild(ok);
         btnBox.appendChild(reopen);
       } else {
-        btnBox.innerHTML = `<div style="opacity:.7;">Waiting for maintenance / in progress…</div>`;
+        btnBox.innerHTML = <div style="opacity:.7;">Waiting for maintenance / in progress…</div>;
       }
 
       myEl.appendChild(card);
     }
   }
 
-  await refreshMy();
+  function openCreateTicketModal(line, station) {
+    const modal = showModal(
+      <div class="card" style="width:min(560px,92vw);">
+        <div style="font-weight:1000;font-size:20px;">New ticket — ${line} / ${station}</div>
+        <div style="height:10px;"></div>
 
-  // Real-time refresh ONLY (no polling)
-  const ch = sb.channel(`line_${line}_tickets`)
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <select id="prio" class="select" style="min-width:160px;">
+            <option value="LOW">LOW</option>
+            <option value="MED" selected>MED</option>
+            <option value="HIGH">HIGH</option>
+          </select>
+
+          <input id="issue" class="input" placeholder="Issue type (optional)" style="flex:1;min-width:180px;" />
+        </div>
+
+        <div style="height:10px;"></div>
+        <textarea id="desc" placeholder="Describe problem… (required)"></textarea>
+
+        <div style="height:10px;"></div>
+        <div style="display:flex;gap:10px;">
+          <button id="cancel" class="btn">Cancel</button>
+          <button id="send" class="btn btnBlue" style="flex:1;">SEND</button>
+        </div>
+      </div>
+    );
+
+    modal.el.querySelector("#cancel").onclick = modal.close;
+
+    modal.el.querySelector("#send").onclick = async () => {
+      const prio = modal.el.querySelector("#prio").value;
+      const issue = modal.el.querySelector("#issue").value.trim();
+      const desc = modal.el.querySelector("#desc").value.trim();
+
+      if (!desc) { alert("Description required."); return; }
+
+      const { error } = await sb.from("tickets").insert({
+        line,
+        station,
+        priority: prio,
+        issue_type: issue || null,
+        description: desc,
+        status: "NEW",
+        created_at: new Date().toISOString(),
+      });
+
+      if (error) {
+        console.error(error);
+        alert("Failed to create ticket");
+      } else {
+        modal.close();
+      }
+    };
+  }
+
+  refreshMy();
+
+  sb.channel(line_${line}_tickets)
     .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, (payload) => {
       if (payload.new?.line === line || payload.old?.line === line) refreshMy();
     })
     .subscribe();
-  addSub(ch);
+
+  // keep line view auto-refresh (simple and ok)
+  setInterval(refreshMy, 2000);
 }
 
 // ====== MAINTENANCE BOARD ======
 async function loadMaintenance() {
   const state = { q: "", line: "ALL" };
 
-  app.innerHTML = `
+  app.innerHTML = 
     <div class="header">MAINTENANCE</div>
 
     <div class="topbar" style="flex-wrap:wrap;">
@@ -403,7 +383,7 @@ async function loadMaintenance() {
 
       <select id="lineFilter" class="select">
         <option value="ALL">All lines</option>
-        ${Array.from({ length: 9 }, (_, i) => `<option value="L${i + 1}">L${i + 1}</option>`).join("")}
+        ${Array.from({ length: 9 }, (_, i) => <option value="L${i + 1}">L${i + 1}</option>).join("")}
       </select>
 
       <select id="rangePreset" class="select">
@@ -420,7 +400,6 @@ async function loadMaintenance() {
 
       <a class="btn" href="#monitor">Monitor</a>
       <a class="btn" href="#parts">Spare Parts</a>
-      <a class="btn" href="#line/L1">Line L1</a>
     </div>
 
     <div class="board">
@@ -437,7 +416,7 @@ async function loadMaintenance() {
         <div class="colBody" id="colDONE"></div>
       </div>
     </div>
-  `;
+  ;
 
   const searchEl = document.getElementById("search");
   const lineEl = document.getElementById("lineFilter");
@@ -508,9 +487,9 @@ async function loadMaintenance() {
   function makeCard(t) {
     const sec = calcSeconds(t);
     const card = document.createElement("div");
-    card.className = `card ${urgencyClass(sec)}`;
+    card.className = card ${urgencyClass(sec)};
 
-    card.innerHTML = `
+    card.innerHTML = 
       <div class="cardTop">
         <div class="pill">${t.line}</div>
         <div class="timeBig"
@@ -530,13 +509,13 @@ async function loadMaintenance() {
         <div style="opacity:.75;">${t.issue_type || ""}</div>
       </div>
 
-      ${t.maint_comment ? `<div class="meta"><span style="opacity:.7;">Maint</span><span>${t.maint_comment}</span></div>` : ""}
+      ${t.maint_comment ? <div class="meta"><span style="opacity:.7;">Maint</span><span>${t.maint_comment}</span></div> : ""}
       <div class="meta"><span style="opacity:.7;">Created</span><span>${fmtDateTime(t.created_at)}</span></div>
 
       <div class="actions" id="btns-${t.id}" style="margin-top:10px;"></div>
-    `;
+    ;
 
-    const btns = card.querySelector(`#btns-${t.id}`);
+    const btns = card.querySelector(#btns-${t.id});
     const st = String(t.status || "").toUpperCase();
 
     const takeBtn = document.createElement("button");
@@ -563,6 +542,7 @@ async function loadMaintenance() {
       const comment = prompt("Short fix comment (required):", "Fixed / adjusted / replaced…");
       if (!comment || !comment.trim()) { alert("Comment required."); return; }
 
+      // optional parts: PARTNO=QTY,PARTNO=QTY
       const raw = prompt("Parts used? Format: PARTNO=QTY,PARTNO=QTY (leave empty if none)", "");
 
       try {
@@ -576,13 +556,13 @@ async function loadMaintenance() {
             const qty = Number(qtyStrRaw);
 
             if (!no || !Number.isFinite(qty) || qty <= 0) {
-              alert(`Bad format: ${p}\nUse: PARTNO=QTY,PARTNO=QTY`);
+              alert(Bad format: ${p}\nUse: PARTNO=QTY,PARTNO=QTY);
               return;
             }
 
             const part = await findPartByNo(no);
             if (!part || part.is_active === false) {
-              alert(`Unknown or inactive part number: ${no}`);
+              alert(Unknown or inactive part number: ${no});
               return;
             }
 
@@ -596,7 +576,7 @@ async function loadMaintenance() {
 
           if (rpcErr) {
             console.error(rpcErr);
-            alert(`Stock update failed: ${rpcErr.message}`);
+            alert(Stock update failed: ${rpcErr.message});
             return;
           }
         }
@@ -618,7 +598,7 @@ async function loadMaintenance() {
         if (error) console.error(error);
       } catch (e) {
         console.error(e);
-        alert(`Error: ${e?.message || e}`);
+        alert(Error: ${e?.message || e});
       }
     };
 
@@ -717,7 +697,7 @@ async function loadMaintenance() {
 
     const a = document.createElement("a");
     a.href = url;
-    a.download = `maintenance_${state.line}_${toDateInputValue(from)}_to_${toDateInputValue(to)}.csv`;
+    a.download = maintenance_${state.line}_${toDateInputValue(from)}_to_${toDateInputValue(to)}.csv;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -727,13 +707,12 @@ async function loadMaintenance() {
   exportBtn.onclick = downloadTicketsCSV;
 
   syncDateInputs();
-  await render();
+  render();
 
-  // Real-time updates ONLY (no polling). Also ignore our own UI updates noise by just re-rendering once per change.
-  const ch = sb.channel("tickets_maintenance")
-    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, () => render())
+  // Realtime updates only (NO 2s polling → stops the “refresh” feeling)
+  sb.channel("tickets_maintenance")
+    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
     .subscribe();
-  addSub(ch);
 
   searchEl.addEventListener("input", render);
   lineEl.addEventListener("change", render);
@@ -745,7 +724,7 @@ async function loadMaintenance() {
 
 // ====== MONITOR ======
 async function loadMonitor() {
-  app.innerHTML = `
+  app.innerHTML = 
     <div class="header">MONITOR</div>
     <div class="topbar">
       <a class="btn" href="#maintenance">Maintenance</a>
@@ -754,7 +733,7 @@ async function loadMonitor() {
       <div style="opacity:.8;">Yellow ≥ ${YELLOW_AFTER_MIN}min | Red ≥ ${RED_AFTER_MIN}min</div>
     </div>
     <div style="padding:12px;" id="rows"></div>
-  `;
+  ;
 
   const rowsEl = document.getElementById("rows");
 
@@ -779,8 +758,9 @@ async function loadMonitor() {
       const partsRows = await loadPartsForTicket(t.id);
 
       const card = document.createElement("div");
-      card.className = `card ${urgencyClass(sec)}`;
-      card.innerHTML = `
+      card.className = card ${urgencyClass(sec)};
+
+      card.innerHTML = 
         <div class="cardTop">
           <div class="pill">${t.line}</div>
           <div class="timeBig"
@@ -793,32 +773,30 @@ async function loadMonitor() {
         </div>
         <div class="title">${t.station} — ${t.status}</div>
         <div class="desc">${t.description || ""}</div>
-        ${t.maint_comment ? `<div class="meta"><span style="opacity:.7;">Maint</span><span>${t.maint_comment}</span></div>` : ""}
+        ${t.maint_comment ? <div class="meta"><span style="opacity:.7;">Maint</span><span>${t.maint_comment}</span></div> : ""}
         ${partsListHtml(partsRows)}
-      `;
+      ;
       rowsEl.appendChild(card);
     }
   }
 
-  await render();
+  render();
 
-  const ch = sb.channel("tickets_monitor")
-    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, () => render())
+  sb.channel("tickets_monitor")
+    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
     .subscribe();
-  addSub(ch);
 }
 
-// ====== PARTS / STOCK SCREEN ======
+// ====== PARTS / STOCK SCREEN (EDITABLE) ======
 async function loadPartsScreen() {
   const state = { q: "", onlyActive: true };
 
-  app.innerHTML = `
+  app.innerHTML = 
     <div class="header">SPARE PARTS / STOCK</div>
 
     <div class="topbar" style="flex-wrap:wrap;">
       <a class="btn" href="#maintenance">Maintenance</a>
       <a class="btn" href="#monitor">Monitor</a>
-      <a class="btn" href="#line/L1">Line L1</a>
 
       <input id="search" class="input" placeholder="Search part no / name..." style="min-width:220px;" />
 
@@ -838,7 +816,7 @@ async function loadPartsScreen() {
 
       <div id="list" style="display:grid;gap:10px;"></div>
     </div>
-  `;
+  ;
 
   const searchEl = document.getElementById("search");
   const activeEl = document.getElementById("activeFilter");
@@ -891,7 +869,7 @@ async function loadPartsScreen() {
   }
 
   function openAddModal() {
-    const modal = showModal(`
+    const modal = showModal(
       <div class="card" style="width:min(700px,92vw);">
         <div style="font-weight:1000;font-size:20px;">Add spare part</div>
         <div style="height:10px;"></div>
@@ -913,7 +891,7 @@ async function loadPartsScreen() {
           <button id="save" class="btn btnBlue" style="flex:1;">SAVE</button>
         </div>
       </div>
-    `);
+    );
 
     modal.el.querySelector("#cancel").onclick = modal.close;
 
@@ -950,7 +928,7 @@ async function loadPartsScreen() {
 
   function openEditModal(row) {
     const p = row.part;
-    const modal = showModal(`
+    const modal = showModal(
       <div class="card" style="width:min(760px,92vw);">
         <div style="font-weight:1000;font-size:20px;">Edit part — ${p.part_no}</div>
         <div style="height:10px;"></div>
@@ -981,7 +959,7 @@ async function loadPartsScreen() {
           <button id="save" class="btn btnBlue" style="flex:1;">SAVE</button>
         </div>
       </div>
-    `);
+    );
 
     modal.el.querySelector("#cancel").onclick = modal.close;
 
@@ -1040,7 +1018,7 @@ async function loadPartsScreen() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `spare_parts_${new Date().toISOString().slice(0,10)}.csv`;
+    a.download = spare_parts_${new Date().toISOString().slice(0,10)}.csv;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -1053,7 +1031,7 @@ async function loadPartsScreen() {
 
     listEl.innerHTML = "";
     if (rows.length === 0) {
-      listEl.innerHTML = `<div class="card" style="opacity:.8;">No parts found.</div>`;
+      listEl.innerHTML = <div class="card" style="opacity:.8;">No parts found.</div>;
       return;
     }
 
@@ -1064,9 +1042,9 @@ async function loadPartsScreen() {
       const low = qty <= minq;
 
       const card = document.createElement("div");
-      card.className = `card ${lowStockClass(qty, minq)}`;
+      card.className = card ${lowStockClass(qty, minq)};
 
-      card.innerHTML = `
+      card.innerHTML = 
         <div class="cardTop">
           <div class="pill">${p.part_no}</div>
           <div style="font-weight:1000;font-size:18px;">${qty} ${p.uom || ""}</div>
@@ -1084,7 +1062,7 @@ async function loadPartsScreen() {
         </div>
 
         <div class="actions" style="margin-top:10px;"></div>
-      `;
+      ;
 
       const actions = card.querySelector(".actions");
       const editBtn = document.createElement("button");
@@ -1103,15 +1081,13 @@ async function loadPartsScreen() {
   searchEl.addEventListener("input", render);
   activeEl.addEventListener("change", render);
 
-  await render();
+  render();
 
-  const ch1 = sb.channel("parts_live_spare_parts")
-    .on("postgres_changes", { event: "*", schema: "public", table: "spare_parts" }, () => render())
+  sb.channel("parts_live_spare_parts")
+    .on("postgres_changes", { event: "*", schema: "public", table: "spare_parts" }, render)
     .subscribe();
-  addSub(ch1);
 
-  const ch2 = sb.channel("parts_live_stock")
-    .on("postgres_changes", { event: "*", schema: "public", table: "stock" }, () => render())
+  sb.channel("parts_live_stock")
+    .on("postgres_changes", { event: "*", schema: "public", table: "stock" }, render)
     .subscribe();
-  addSub(ch2);
 }
