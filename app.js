@@ -357,8 +357,6 @@ async function loadLine(line) {
     };
   }
 
-  refreshMy();
-
 refreshMy();
 
 // Debounce + prevent overlapping refreshes
@@ -382,20 +380,21 @@ function scheduleRefresh() {
   refreshTimer = setTimeout(safeRefresh, 150);
 }
 
-// Realtime only for THIS line
-sb.channel(`line_${line}_tickets`)
+// cleanup old channel (prevents stacking)
+if (window.__lineChannel) {
+  try { await sb.removeChannel(window.__lineChannel); } catch (e) {}
+  window.__lineChannel = null;
+}
+
+// Realtime only for THIS line (stored globally)
+window.__lineChannel = sb
+  .channel(`line_${line}_tickets`)
   .on(
     "postgres_changes",
-    {
-      event: "*",
-      schema: "public",
-      table: "tickets",
-      filter: `line=eq.${line}`,
-    },
+    { event: "*", schema: "public", table: "tickets", filter: `line=eq.${line}` },
     scheduleRefresh
   )
   .subscribe();
-
 }
 
 // ====== MAINTENANCE BOARD ======
@@ -1118,5 +1117,6 @@ async function loadPartsScreen() {
     .on("postgres_changes", { event: "*", schema: "public", table: "stock" }, render)
     .subscribe();
 }
+
 
 
