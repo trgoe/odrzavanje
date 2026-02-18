@@ -8,12 +8,15 @@ window.__MAINT_APP_LOADED__ = true;
 console.log("maintenance app.js loaded");
 
 // ====== CONFIG ======
-// IMPORTANT: Use the URL + ANON PUBLIC KEY from the SAME Supabase project:
-// Supabase Dashboard → Settings → API
 const SUPABASE_URL = "https://hfyvjtaumvmaqeqkmiyk.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhmeXZqdGF1bXZtYXFlcWttaXlrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEyNDgxNTksImV4cCI6MjA4NjgyNDE1OX0.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
+const SUPABASE_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmVhc2UiLCJyZWYiOiJoZnl2anRhdW12bWFxZXFrbWl5ayIsInJvbGUiOiJhbm9uIiwiaWF0IjoxNzcxMjQ4MTU5LCJleHAiOjIwODY4MjQxNTl9.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
+
 const YELLOW_AFTER_MIN = 5;
 const RED_AFTER_MIN = 10;
+
+// Poll fallback (in case Realtime is not enabled for tables)
+const POLL_MS = 3000;
 
 // ====== INIT ======
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -174,6 +177,12 @@ function partsListHtml(partsRows) {
 
 // ====== ROUTER + CLEANUP ======
 async function cleanupActive() {
+  // stop fallback polling timers
+  if (window.__linePoll) { clearInterval(window.__linePoll); window.__linePoll = null; }
+  if (window.__maintenancePoll) { clearInterval(window.__maintenancePoll); window.__maintenancePoll = null; }
+  if (window.__monitorPoll) { clearInterval(window.__monitorPoll); window.__monitorPoll = null; }
+
+  // remove realtime channels
   if (window.__lineChannel) { try { await sb.removeChannel(window.__lineChannel); } catch (e) {} window.__lineChannel = null; }
   if (window.__maintenanceChannel) { try { await sb.removeChannel(window.__maintenanceChannel); } catch (e) {} window.__maintenanceChannel = null; }
   if (window.__monitorChannel) { try { await sb.removeChannel(window.__monitorChannel); } catch (e) {} window.__monitorChannel = null; }
@@ -192,7 +201,6 @@ async function router() {
 }
 
 window.addEventListener("hashchange", router);
-router();
 
 // ====== OPERATOR (LINE) ======
 async function loadLine(line) {
@@ -220,6 +228,7 @@ async function loadLine(line) {
   const stationsEl = document.getElementById("stations");
   const myEl = document.getElementById("myTickets");
 
+  // Load stations
   const { data: stations, error: stErr } = await sb
     .from("stations")
     .select("*")
@@ -242,7 +251,6 @@ async function loadLine(line) {
   });
 
   async function refreshMy() {
-    // console.count("refreshMy"); // uncomment for debug
     const { data, error } = await sb
       .from("tickets")
       .select("*")
@@ -327,6 +335,26 @@ async function loadLine(line) {
     }
   }
 
+  // Debounce + prevent overlapping refreshes (important when realtime fires bursts)
+  let refreshInFlight = false;
+  let refreshQueued = false;
+  let refreshTimer = null;
+
+  async function safeRefresh() {
+    if (refreshInFlight) { refreshQueued = true; return; }
+    refreshInFlight = true;
+    try { await refreshMy(); }
+    finally {
+      refreshInFlight = false;
+      if (refreshQueued) { refreshQueued = false; safeRefresh(); }
+    }
+  }
+
+  function scheduleRefresh() {
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(safeRefresh, 150);
+  }
+
   function openCreateTicketModal(line, station) {
     const modal = showModal(`
       <div class="card" style="width:min(560px,92vw);">
@@ -354,39 +382,40 @@ async function loadLine(line) {
       </div>
     `);
 
-     if (error) {
-    console.error(error);
-    alert("Failed to create ticket");
-  } else {
-    modal.close();
-    refreshMy(); //
-  }
+    modal.el.querySelector("#cancel").onclick = modal.close;
 
+    modal.el.querySelector("#send").onclick = async () => {
+      const prio = modal.el.querySelector("#prio").value;
+      const issue = modal.el.querySelector("#issue").value.trim();
+      const desc = modal.el.querySelector("#desc").value.trim();
+
+      if (!desc) { alert("Description required."); return; }
+
+      const { error } = await sb.from("tickets").insert({
+        line,
+        station,
+        priority: prio,
+        issue_type: issue || null,
+        description: desc,
+        status: "NEW",
+        created_at: new Date().toISOString(),
+      });
+
+      if (error) {
+        console.error(error);
+        alert("Failed to create ticket");
+      } else {
+        modal.close();
+        // ✅ instant local update (so operator sees it immediately)
+        scheduleRefresh();
+      }
+    };
+  }
 
   // initial load
-  refreshMy();
+  await refreshMy();
 
-  // Debounce + prevent overlapping refreshes
-  let refreshInFlight = false;
-  let refreshQueued = false;
-  let refreshTimer = null;
-
-  async function safeRefresh() {
-    if (refreshInFlight) { refreshQueued = true; return; }
-    refreshInFlight = true;
-    try { await refreshMy(); }
-    finally {
-      refreshInFlight = false;
-      if (refreshQueued) { refreshQueued = false; safeRefresh(); }
-    }
-  }
-
-  function scheduleRefresh() {
-    clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(safeRefresh, 150);
-  }
-
-  // Realtime only for THIS line
+  // Realtime only for THIS line + poll fallback
   window.__lineChannel = sb
     .channel(`line_${line}_tickets`)
     .on(
@@ -395,6 +424,8 @@ async function loadLine(line) {
       scheduleRefresh
     )
     .subscribe();
+
+  window.__linePoll = setInterval(scheduleRefresh, POLL_MS);
 }
 
 // ====== MAINTENANCE BOARD ======
@@ -568,7 +599,6 @@ async function loadMaintenance() {
       const comment = prompt("Short fix comment (required):", "Fixed / adjusted / replaced…");
       if (!comment || !comment.trim()) { alert("Comment required."); return; }
 
-      // optional parts: PARTNO=QTY,PARTNO=QTY
       const raw = prompt("Parts used? Format: PARTNO=QTY,PARTNO=QTY (leave empty if none)", "");
 
       try {
@@ -733,12 +763,21 @@ async function loadMaintenance() {
   exportBtn.onclick = downloadTicketsCSV;
 
   syncDateInputs();
-  render();
+  await render();
 
-  // Realtime updates
-  window.__maintenanceChannel = sb.channel("tickets_maintenance")
-    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
+  // Realtime + poll fallback
+  let maintTimer = null;
+  function scheduleMaintRender() {
+    clearTimeout(maintTimer);
+    maintTimer = setTimeout(render, 150);
+  }
+
+  window.__maintenanceChannel = sb
+    .channel("tickets_maintenance")
+    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, scheduleMaintRender)
     .subscribe();
+
+  window.__maintenancePoll = setInterval(scheduleMaintRender, POLL_MS);
 
   searchEl.addEventListener("input", render);
   lineEl.addEventListener("change", render);
@@ -806,11 +845,21 @@ async function loadMonitor() {
     }
   }
 
-  render();
+  await render();
 
-  window.__monitorChannel = sb.channel("tickets_monitor")
-    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
+  // Realtime + poll fallback
+  let monTimer = null;
+  function scheduleMon() {
+    clearTimeout(monTimer);
+    monTimer = setTimeout(render, 150);
+  }
+
+  window.__monitorChannel = sb
+    .channel("tickets_monitor")
+    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, scheduleMon)
     .subscribe();
+
+  window.__monitorPoll = setInterval(scheduleMon, POLL_MS);
 }
 
 // ====== PARTS / STOCK SCREEN (EDITABLE) ======
@@ -1107,14 +1156,18 @@ async function loadPartsScreen() {
   searchEl.addEventListener("input", render);
   activeEl.addEventListener("change", render);
 
-  render();
+  await render();
 
-  window.__partsChannel1 = sb.channel("parts_live_spare_parts")
+  window.__partsChannel1 = sb
+    .channel("parts_live_spare_parts")
     .on("postgres_changes", { event: "*", schema: "public", table: "spare_parts" }, render)
     .subscribe();
 
-  window.__partsChannel2 = sb.channel("parts_live_stock")
+  window.__partsChannel2 = sb
+    .channel("parts_live_stock")
     .on("postgres_changes", { event: "*", schema: "public", table: "stock" }, render)
     .subscribe();
 }
 
+// ====== START APP ======
+router();
