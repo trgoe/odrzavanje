@@ -359,14 +359,43 @@ async function loadLine(line) {
 
   refreshMy();
 
-  sb.channel(`line_${line}_tickets`)
-    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, (payload) => {
-      if (payload.new?.line === line || payload.old?.line === line) refreshMy();
-    })
-    .subscribe();
+refreshMy();
 
-  // keep line view auto-refresh (simple and ok)
-  setInterval(refreshMy, 2000);
+// Debounce + prevent overlapping refreshes
+let refreshInFlight = false;
+let refreshQueued = false;
+let refreshTimer = null;
+
+async function safeRefresh() {
+  if (refreshInFlight) { refreshQueued = true; return; }
+  refreshInFlight = true;
+  try {
+    await refreshMy();
+  } finally {
+    refreshInFlight = false;
+    if (refreshQueued) { refreshQueued = false; safeRefresh(); }
+  }
+}
+
+function scheduleRefresh() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(safeRefresh, 150);
+}
+
+// Realtime only for THIS line
+sb.channel(`line_${line}_tickets`)
+  .on(
+    "postgres_changes",
+    {
+      event: "*",
+      schema: "public",
+      table: "tickets",
+      filter: `line=eq.${line}`,
+    },
+    scheduleRefresh
+  )
+  .subscribe();
+
 }
 
 // ====== MAINTENANCE BOARD ======
@@ -1089,4 +1118,5 @@ async function loadPartsScreen() {
     .on("postgres_changes", { event: "*", schema: "public", table: "stock" }, render)
     .subscribe();
 }
+
 
