@@ -204,6 +204,7 @@ window.addEventListener("hashchange", routeTo);
 routeTo();
 
 // ====== OPERATOR (LINE) ======
+// ====== OPERATOR (LINE) ======
 async function loadLine(line) {
   app.innerHTML = `
     <div class="header">LINE ${line} — Maintenance Call</div>
@@ -229,6 +230,7 @@ async function loadLine(line) {
   const stationsEl = document.getElementById("stations");
   const myEl = document.getElementById("myTickets");
 
+  // Stations
   const { data: stations, error: stErr } = await sb
     .from("stations")
     .select("*")
@@ -250,30 +252,13 @@ async function loadLine(line) {
     stationsEl.appendChild(btn);
   });
 
-  // --- PATCH-ONLY STATE (NO full list re-render) ---
-  const cardById = new Map(); // ticketId -> card element
-  const partsCache = new Map(); // ticketId -> parts html
-  const orderedIds = []; // keep DOM order in sync (newest top)
+  // --- PATCH STATE ---
+  const cardById = new Map();   // ticketId -> DOM element
+  const partsCache = new Map(); // ticketId -> html
 
-  function ensureLimit30() {
-    while (orderedIds.length > 30) {
-      const id = orderedIds.pop();
-      const el = cardById.get(id);
-      if (el) el.remove();
-      cardById.delete(id);
-      partsCache.delete(id);
-    }
-  }
-
-  function upsertOrderTop(id) {
-    const idx = orderedIds.indexOf(id);
-    if (idx !== -1) orderedIds.splice(idx, 1);
-    orderedIds.unshift(id);
-  }
-
-  function removeFromOrder(id) {
-    const idx = orderedIds.indexOf(id);
-    if (idx !== -1) orderedIds.splice(idx, 1);
+  function needsParts(status) {
+    const st = String(status || "").toUpperCase();
+    return st === "DONE" || st === "CONFIRMED" || st === "REOPENED";
   }
 
   function renderActions(card, t) {
@@ -349,41 +334,54 @@ async function loadLine(line) {
     `;
   }
 
-  function applyTicketToCard(t, { moveToTop = false } = {}) {
+  function upsertCard(t, { placeTop = false } = {}) {
     const sec = calcSeconds(t);
     let card = cardById.get(t.id);
 
     if (!card) {
       card = document.createElement("div");
       cardById.set(t.id, card);
-      // insert at top by default
-      moveToTop = true;
-    }
+      card.className = `card ${urgencyClass(sec)}`;
+      card.innerHTML = cardHtml(t);
+      renderActions(card, t);
 
-    card.className = `card ${urgencyClass(sec)}`;
-    card.innerHTML = cardHtml(t);
-    renderActions(card, t);
-
-    if (moveToTop) {
-      upsertOrderTop(t.id);
-      myEl.prepend(card);
+      if (placeTop) myEl.prepend(card);
+      else myEl.appendChild(card);
     } else {
-      // keep current DOM position; do nothing
-    }
+      // preserve existing parts HTML while we rebuild the card content
+      const partsEl = card.querySelector(`#parts-${t.id}`);
+      const existingParts = partsEl ? partsEl.innerHTML : (partsCache.get(t.id) || "");
+      partsCache.set(t.id, existingParts);
 
-    ensureLimit30();
+      card.className = `card ${urgencyClass(sec)}`;
+      card.innerHTML = cardHtml(t);
+      renderActions(card, t);
+    }
   }
 
-  function removeTicket(id) {
+  function removeCard(id) {
     const card = cardById.get(id);
     if (card) card.remove();
     cardById.delete(id);
     partsCache.delete(id);
-    removeFromOrder(id);
+  }
+
+  function enforceLimit30() {
+    const cards = Array.from(myEl.children);
+    while (cards.length > 30) {
+      const last = cards.pop();
+      if (!last) break;
+      const action = last.querySelector(".actions");
+      const id = action?.id?.replace("opBtns-", "");
+      last.remove();
+      if (id) {
+        cardById.delete(id);
+        partsCache.delete(id);
+      }
+    }
   }
 
   async function updateParts(ticketId) {
-    // update only if card is visible
     const card = cardById.get(ticketId);
     if (!card) return;
 
@@ -395,44 +393,69 @@ async function loadLine(line) {
     if (partsEl) partsEl.innerHTML = html;
   }
 
-  function needsPartsForStatus(status) {
-    const st = String(status || "").toUpperCase();
-    return st === "DONE" || st === "CONFIRMED" || st === "REOPENED";
-  }
+  // ---- Initial load (ONE fetch, render all) ----
+  const { data: tickets, error: tErr } = await sb
+    .from("tickets")
+    .select("*")
+    .eq("line", line)
+    .order("created_at", { ascending: false })
+    .limit(30);
 
-  async function initialLoad() {
-    const { data, error } = await sb
-      .from("tickets")
-      .select("*")
-      .eq("line", line)
-      .order("created_at", { ascending: false })
-      .limit(30);
+  if (tErr) console.error(tErr);
 
-    if (error) console.error(error);
+  myEl.innerHTML = "";
+  cardById.clear();
+  partsCache.clear();
 
-    myEl.innerHTML = "";
-    cardById.clear();
-    partsCache.clear();
-    orderedIds.length = 0;
+  (tickets || []).forEach((t) => {
+    upsertCard(t, { placeTop: false }); // append in query order
+    if (needsParts(t.status)) updateParts(t.id);
+  });
 
-    for (const t of data || []) {
-      upsertOrderTop(t.id);
-      applyTicketToCard(t, { moveToTop: false });
-      if (needsPartsForStatus(t.status)) updateParts(t.id);
-    }
+  // ---- Realtime: PATCH ONLY ----
+  const ch = sb
+    .channel(`line_${line}_live`)
+    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, (payload) => {
+      const ev = payload.eventType; // INSERT/UPDATE/DELETE
+      const n = payload.new;
+      const o = payload.old;
 
-    // ensure correct order (newest first)
-    // (we already rendered in DB order newest->oldest with prepend disabled; fix DOM order once)
-    const frag = document.createDocumentFragment();
-    for (const id of orderedIds) {
-      const el = cardById.get(id);
-      if (el) frag.appendChild(el);
-    }
-    myEl.replaceChildren(frag);
+      const newLine = n?.line;
+      const oldLine = o?.line;
+      if (newLine !== line && oldLine !== line) return;
 
-    ensureLimit30();
-  }
+      if (ev === "DELETE") {
+        if (o?.id) removeCard(o.id);
+        return;
+      }
 
+      if (!n?.id) return;
+
+      // Insert goes to top, update stays in place (no full reorder)
+      upsertCard(n, { placeTop: ev === "INSERT" });
+
+      if (needsParts(n.status)) updateParts(n.id);
+      else {
+        // if ticket moved away from DONE etc, clear parts
+        partsCache.set(n.id, "");
+        const card = cardById.get(n.id);
+        const partsEl = card?.querySelector(`#parts-${n.id}`);
+        if (partsEl) partsEl.innerHTML = "";
+      }
+
+      enforceLimit30();
+    })
+    .on("postgres_changes", { event: "*", schema: "public", table: "ticket_parts" }, (payload) => {
+      const tid = payload?.new?.ticket_id ?? payload?.old?.ticket_id;
+      if (!tid) return;
+      updateParts(tid); // update only that ticket parts
+    })
+    .subscribe();
+
+  // Track channel for cleanupRealtime()
+  if (typeof activeChannels !== "undefined") activeChannels.push(ch);
+
+  // ---- Modal ----
   function openCreateTicketModal(line, station) {
     const modal = showModal(`
       <div class="card" style="width:min(560px,92vw);">
@@ -490,8 +513,7 @@ async function loadLine(line) {
       }
     };
   }
-
-  await initialLoad();
+}
 
   // --- REALTIME: PATCH ONLY (NO refreshMy, NO interval) ---
   const ch = sb
@@ -1355,3 +1377,4 @@ async function loadPartsScreen() {
 
   activeChannels.push(ch1, ch2);
 }
+
