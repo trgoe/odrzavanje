@@ -1,8 +1,6 @@
 console.log("maintenance app.js loaded");
 
 // ====== CONFIG ======
-// IMPORTANT: Use the URL + ANON PUBLIC KEY from the SAME Supabase project:
-// Supabase Dashboard → Settings → API
 const SUPABASE_URL = "https://hfyvjtaumvmaqeqkmiyk.supabase.co";
 const SUPABASE_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhmeXZqdGF1bXZtYXFlcWttaXlrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEyNDgxNTksImV4cCI6MjA4NjgyNDE1OX0.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
@@ -19,9 +17,7 @@ let activeChannels = [];
 function cleanupRealtime() {
   try {
     activeChannels.forEach((ch) => sb.removeChannel(ch));
-  } catch (e) {
-    // ignore
-  }
+  } catch (e) {}
   activeChannels = [];
 }
 
@@ -119,7 +115,6 @@ function updateTimersOnly() {
     el.textContent = formatSec(sec);
   });
 }
-// One global ticker for any screen that has timer elements
 setInterval(updateTimersOnly, 1000);
 
 // ====== CSV HELPERS ======
@@ -157,7 +152,7 @@ async function findPartByNo(partNo) {
     .eq("part_no", partNo)
     .maybeSingle();
   if (error) throw error;
-  return data; // null if not found
+  return data;
 }
 
 async function loadPartsForTicket(ticketId) {
@@ -204,7 +199,6 @@ window.addEventListener("hashchange", routeTo);
 routeTo();
 
 // ====== OPERATOR (LINE) ======
-// ====== OPERATOR (LINE) ======
 async function loadLine(line) {
   app.innerHTML = `
     <div class="header">LINE ${line} — Maintenance Call</div>
@@ -230,7 +224,6 @@ async function loadLine(line) {
   const stationsEl = document.getElementById("stations");
   const myEl = document.getElementById("myTickets");
 
-  // Stations
   const { data: stations, error: stErr } = await sb
     .from("stations")
     .select("*")
@@ -253,8 +246,9 @@ async function loadLine(line) {
   });
 
   // --- PATCH STATE ---
-  const cardById = new Map();   // ticketId -> DOM element
-  const partsCache = new Map(); // ticketId -> html
+  const cardById = new Map(); // ticketId -> DOM
+  const partsCache = new Map(); // ticketId -> parts html
+  const ticketsById = new Map(); // ticketId -> cached ticket (merged)
 
   function needsParts(status) {
     const st = String(status || "").toUpperCase();
@@ -273,11 +267,22 @@ async function loadLine(line) {
       ok.className = "btnGreen";
       ok.textContent = "CONFIRM";
       ok.onclick = async () => {
+        const nowIso = new Date().toISOString();
         const { error } = await sb
           .from("tickets")
-          .update({ status: "CONFIRMED", confirmed_at: new Date().toISOString() })
+          .update({ status: "CONFIRMED", confirmed_at: nowIso })
           .eq("id", t.id);
-        if (error) console.error(error);
+
+        if (error) {
+          console.error(error);
+          return;
+        }
+
+        // Optimistic UI update
+        const prev = ticketsById.get(t.id) || t;
+        const merged = { ...prev, status: "CONFIRMED", confirmed_at: nowIso };
+        ticketsById.set(t.id, merged);
+        upsertCard(merged);
       };
 
       const reopen = document.createElement("button");
@@ -285,17 +290,36 @@ async function loadLine(line) {
       reopen.textContent = "NOT FIXED";
       reopen.onclick = async () => {
         const reason = prompt("Short reason (optional):", "Still not working");
+        const nowIso = new Date().toISOString();
+
         const { error } = await sb
           .from("tickets")
           .update({
             status: "REOPENED",
-            confirmed_at: new Date().toISOString(),
+            confirmed_at: nowIso,
             operator_comment: reason || null,
             duration_sec: null,
             done_at: null,
           })
           .eq("id", t.id);
-        if (error) console.error(error);
+
+        if (error) {
+          console.error(error);
+          return;
+        }
+
+        // Optimistic UI update
+        const prev = ticketsById.get(t.id) || t;
+        const merged = {
+          ...prev,
+          status: "REOPENED",
+          confirmed_at: nowIso,
+          operator_comment: reason || null,
+          duration_sec: null,
+          done_at: null,
+        };
+        ticketsById.set(t.id, merged);
+        upsertCard(merged);
       };
 
       btnBox.appendChild(ok);
@@ -335,27 +359,34 @@ async function loadLine(line) {
   }
 
   function upsertCard(t, { placeTop = false } = {}) {
-    const sec = calcSeconds(t);
-    let card = cardById.get(t.id);
+    if (!t?.id) return;
+
+    // cache merged ticket
+    const prev = ticketsById.get(t.id) || {};
+    const merged = { ...prev, ...t };
+    ticketsById.set(t.id, merged);
+
+    const sec = calcSeconds(merged);
+    let card = cardById.get(merged.id);
 
     if (!card) {
       card = document.createElement("div");
-      cardById.set(t.id, card);
+      cardById.set(merged.id, card);
       card.className = `card ${urgencyClass(sec)}`;
-      card.innerHTML = cardHtml(t);
-      renderActions(card, t);
+      card.innerHTML = cardHtml(merged);
+      renderActions(card, merged);
 
       if (placeTop) myEl.prepend(card);
       else myEl.appendChild(card);
     } else {
-      // preserve existing parts HTML while we rebuild the card content
-      const partsEl = card.querySelector(`#parts-${t.id}`);
-      const existingParts = partsEl ? partsEl.innerHTML : (partsCache.get(t.id) || "");
-      partsCache.set(t.id, existingParts);
+      // preserve current parts HTML
+      const partsEl = card.querySelector(`#parts-${merged.id}`);
+      const existingParts = partsEl ? partsEl.innerHTML : partsCache.get(merged.id) || "";
+      partsCache.set(merged.id, existingParts);
 
       card.className = `card ${urgencyClass(sec)}`;
-      card.innerHTML = cardHtml(t);
-      renderActions(card, t);
+      card.innerHTML = cardHtml(merged);
+      renderActions(card, merged);
     }
   }
 
@@ -364,6 +395,7 @@ async function loadLine(line) {
     if (card) card.remove();
     cardById.delete(id);
     partsCache.delete(id);
+    ticketsById.delete(id);
   }
 
   function enforceLimit30() {
@@ -377,6 +409,7 @@ async function loadLine(line) {
       if (id) {
         cardById.delete(id);
         partsCache.delete(id);
+        ticketsById.delete(id);
       }
     }
   }
@@ -406,40 +439,50 @@ async function loadLine(line) {
   myEl.innerHTML = "";
   cardById.clear();
   partsCache.clear();
+  ticketsById.clear();
 
   (tickets || []).forEach((t) => {
-    upsertCard(t, { placeTop: false }); // append in query order
+    ticketsById.set(t.id, t);
+    upsertCard(t, { placeTop: false });
     if (needsParts(t.status)) updateParts(t.id);
   });
 
-  // ---- Realtime: PATCH ONLY ----
+  // ---- Realtime: PATCH ONLY + merge partial updates ----
   const ch = sb
     .channel(`line_${line}_live`)
     .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, (payload) => {
-      const ev = payload.eventType; // INSERT/UPDATE/DELETE
-      const n = payload.new;
-      const o = payload.old;
+      const ev = payload.eventType;
+      const n = payload.new || {};
+      const o = payload.old || {};
+      const id = n.id || o.id;
+      if (!id) return;
 
-      const newLine = n?.line;
-      const oldLine = o?.line;
-      if (newLine !== line && oldLine !== line) return;
+      const alreadyShown = cardById.has(id);
+
+      // If we are not already showing it, require line match
+      if (!alreadyShown) {
+        const newLine = n.line;
+        const oldLine = o.line;
+        if (newLine !== line && oldLine !== line) return;
+      }
 
       if (ev === "DELETE") {
-        if (o?.id) removeCard(o.id);
+        removeCard(id);
         return;
       }
 
-      if (!n?.id) return;
+      // Merge partial update into cached ticket
+      const prev = ticketsById.get(id) || {};
+      const merged = { ...prev, ...n };
+      ticketsById.set(id, merged);
 
-      // Insert goes to top, update stays in place (no full reorder)
-      upsertCard(n, { placeTop: ev === "INSERT" });
+      upsertCard(merged, { placeTop: ev === "INSERT" });
 
-      if (needsParts(n.status)) updateParts(n.id);
+      if (needsParts(merged.status)) updateParts(id);
       else {
-        // if ticket moved away from DONE etc, clear parts
-        partsCache.set(n.id, "");
-        const card = cardById.get(n.id);
-        const partsEl = card?.querySelector(`#parts-${n.id}`);
+        partsCache.set(id, "");
+        const card = cardById.get(id);
+        const partsEl = card?.querySelector(`#parts-${id}`);
         if (partsEl) partsEl.innerHTML = "";
       }
 
@@ -448,12 +491,11 @@ async function loadLine(line) {
     .on("postgres_changes", { event: "*", schema: "public", table: "ticket_parts" }, (payload) => {
       const tid = payload?.new?.ticket_id ?? payload?.old?.ticket_id;
       if (!tid) return;
-      updateParts(tid); // update only that ticket parts
+      updateParts(tid);
     })
     .subscribe();
 
-  // Track channel for cleanupRealtime()
-  if (typeof activeChannels !== "undefined") activeChannels.push(ch);
+  activeChannels.push(ch);
 
   // ---- Modal ----
   function openCreateTicketModal(line, station) {
@@ -513,59 +555,6 @@ async function loadLine(line) {
       }
     };
   }
-}
-
-  // --- REALTIME: PATCH ONLY (NO refreshMy, NO interval) ---
-  const ch = sb
-    .channel(`line_${line}_live`)
-    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, (payload) => {
-      const ev = payload.eventType;
-      const n = payload.new;
-      const o = payload.old;
-
-      // ignore other lines
-      const newLine = n?.line;
-      const oldLine = o?.line;
-      if (newLine !== line && oldLine !== line) return;
-
-      if (ev === "DELETE") {
-        if (o?.id) removeTicket(o.id);
-        return;
-      }
-
-      // INSERT / UPDATE
-      const t = n;
-      if (!t?.id) return;
-
-      // For INSERT, move to top
-      if (ev === "INSERT") {
-        applyTicketToCard(t, { moveToTop: true });
-        if (needsPartsForStatus(t.status)) updateParts(t.id);
-        return;
-      }
-
-      // UPDATE: update only this card; keep order unless it is newer than current top
-      applyTicketToCard(t, { moveToTop: false });
-
-      // If status where parts matter, update only parts section
-      if (needsPartsForStatus(t.status)) updateParts(t.id);
-      else {
-        // clear parts for non-relevant statuses
-        partsCache.set(t.id, "");
-        const card = cardById.get(t.id);
-        const partsEl = card?.querySelector(`#parts-${t.id}`);
-        if (partsEl) partsEl.innerHTML = "";
-      }
-    })
-    .on("postgres_changes", { event: "*", schema: "public", table: "ticket_parts" }, (payload) => {
-      const tid = payload?.new?.ticket_id ?? payload?.old?.ticket_id;
-      if (!tid) return;
-      // update only that ticket's parts area
-      updateParts(tid);
-    })
-    .subscribe();
-
-  activeChannels.push(ch);
 }
 
 // ====== MAINTENANCE BOARD ======
@@ -728,7 +717,9 @@ async function loadMaintenance() {
         .from("tickets")
         .update({ status: "TAKEN", taken_at: new Date().toISOString(), taken_by: name || null })
         .eq("id", t.id);
+
       if (error) console.error(error);
+      else render(); // optimistic refresh for maintenance board
     };
 
     const doneBtn = document.createElement("button");
@@ -744,7 +735,6 @@ async function loadMaintenance() {
         return;
       }
 
-      // optional parts: PARTNO=QTY,PARTNO=QTY
       const raw = prompt("Parts used? Format: PARTNO=QTY,PARTNO=QTY (leave empty if none)", "");
 
       try {
@@ -801,6 +791,7 @@ async function loadMaintenance() {
           .eq("id", t.id);
 
         if (error) console.error(error);
+        else render(); // optimistic refresh
       } catch (e) {
         console.error(e);
         alert(`Error: ${e?.message || e}`);
@@ -939,7 +930,6 @@ async function loadMaintenance() {
   syncDateInputs();
   render();
 
-  // Realtime updates only (NO 2s polling → stops the “refresh” feeling)
   const ch = sb
     .channel("tickets_maintenance")
     .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
@@ -1182,9 +1172,7 @@ async function loadPartsScreen() {
         return;
       }
 
-      const { error: sErr } = await sb
-        .from("stock")
-        .insert({ part_id: inserted.id, qty, min_qty, location: location || null });
+      const { error: sErr } = await sb.from("stock").insert({ part_id: inserted.id, qty, min_qty, location: location || null });
 
       if (sErr) {
         console.error(sErr);
@@ -1370,11 +1358,7 @@ async function loadPartsScreen() {
     .on("postgres_changes", { event: "*", schema: "public", table: "spare_parts" }, render)
     .subscribe();
 
-  const ch2 = sb
-    .channel("parts_live_stock")
-    .on("postgres_changes", { event: "*", schema: "public", table: "stock" }, render)
-    .subscribe();
+  const ch2 = sb.channel("parts_live_stock").on("postgres_changes", { event: "*", schema: "public", table: "stock" }, render).subscribe();
 
   activeChannels.push(ch1, ch2);
 }
-
