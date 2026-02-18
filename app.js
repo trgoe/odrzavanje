@@ -5,7 +5,7 @@ console.log("maintenance app.js loaded");
 // Supabase Dashboard → Settings → API
 const SUPABASE_URL = "https://hfyvjtaumvmaqeqkmiyk.supabase.co";
 const SUPABASE_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhbm9uIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEyNDgxNTksImV4cCI6MjA4NjgyNDE1OX0.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhmeXZqdGF1bXZtYXFlcWttaXlrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEyNDgxNTksImV4cCI6MjA4NjgyNDE1OX0.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
 
 const YELLOW_AFTER_MIN = 5;
 const RED_AFTER_MIN = 10;
@@ -14,8 +14,16 @@ const RED_AFTER_MIN = 10;
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
-// Keep track of active realtime channel so we can unsubscribe when switching screens
-let activeRealtimeChannel = null;
+// Ensure we don't keep multiple realtime subscriptions alive when navigating
+let activeChannels = [];
+function cleanupRealtime() {
+  try {
+    activeChannels.forEach((ch) => sb.removeChannel(ch));
+  } catch (e) {
+    // ignore
+  }
+  activeChannels = [];
+}
 
 // ====== TIME HELPERS ======
 function parseTs(ts) {
@@ -183,17 +191,6 @@ function partsListHtml(partsRows) {
 }
 
 // ====== ROUTING ======
-function cleanupRealtime() {
-  if (activeRealtimeChannel) {
-    try {
-      sb.removeChannel(activeRealtimeChannel);
-    } catch (e) {
-      // ignore
-    }
-    activeRealtimeChannel = null;
-  }
-}
-
 function routeTo() {
   cleanupRealtime();
 
@@ -253,73 +250,37 @@ async function loadLine(line) {
     stationsEl.appendChild(btn);
   });
 
-  // ---- Diff-render caches (prevents flash & heavy re-render) ----
+  // --- PATCH-ONLY STATE (NO full list re-render) ---
   const cardById = new Map(); // ticketId -> card element
-  const snapById = new Map(); // ticketId -> snapshot string (ticket fields)
-  const partsHtmlById = new Map(); // ticketId -> rendered parts html
-  const partsDirty = new Set(); // ticketId needing parts refetch
+  const partsCache = new Map(); // ticketId -> parts html
+  const orderedIds = []; // keep DOM order in sync (newest top)
 
-  function ticketSnapshot(t) {
-    // Only include fields that affect the *card HTML* (not the timer text itself).
-    // Timer itself updates via updateTimersOnly() using data-* attributes.
-    return JSON.stringify({
-      id: t.id,
-      line: t.line,
-      station: t.station,
-      priority: t.priority,
-      status: t.status,
-      description: t.description,
-      issue_type: t.issue_type,
-      maint_comment: t.maint_comment,
-      operator_comment: t.operator_comment,
-      created_at: t.created_at,
-      done_at: t.done_at,
-      confirmed_at: t.confirmed_at,
-      duration_sec: t.duration_sec,
-    });
+  function ensureLimit30() {
+    while (orderedIds.length > 30) {
+      const id = orderedIds.pop();
+      const el = cardById.get(id);
+      if (el) el.remove();
+      cardById.delete(id);
+      partsCache.delete(id);
+    }
   }
 
-  function needsParts(t) {
-    const st = String(t.status || "").toUpperCase();
-    // parts become relevant when maintenance closes ticket (DONE) and onward
-    return st === "DONE" || st === "CONFIRMED" || st === "REOPENED";
+  function upsertOrderTop(id) {
+    const idx = orderedIds.indexOf(id);
+    if (idx !== -1) orderedIds.splice(idx, 1);
+    orderedIds.unshift(id);
   }
 
-  function buildCardHtml(t) {
-    const sec = calcSeconds(t);
-    const st = String(t.status || "").toUpperCase();
-
-    // parts placeholder is always present; we fill it async (and only when needed)
-    return `
-      <div class="cardTop">
-        <div class="pill">${t.station}</div>
-        <div class="timeBig"
-             data-timer="1"
-             data-created-at="${t.created_at || ""}"
-             data-status="${t.status || ""}"
-             data-done-at="${t.done_at || ""}"
-             data-confirmed-at="${t.confirmed_at || ""}"
-             data-duration-sec="${t.duration_sec ?? ""}">${formatSec(sec)}</div>
-      </div>
-
-      <div class="title">${t.priority} — ${t.status}</div>
-      <div class="desc">${t.description || ""}</div>
-
-      <div class="meta"><span style="opacity:.7;">Created</span><span>${fmtDateTime(t.created_at)}</span></div>
-      ${t.maint_comment ? `<div class="meta"><span style="opacity:.7;">Maint</span><span>${t.maint_comment}</span></div>` : ""}
-      ${t.operator_comment ? `<div class="meta"><span style="opacity:.7;">Operator</span><span>${t.operator_comment}</span></div>` : ""}
-
-      <div id="parts-${t.id}">${partsHtmlById.get(t.id) || ""}</div>
-
-      <div class="actions" id="opBtns-${t.id}" style="margin-top:10px;"></div>
-    `;
+  function removeFromOrder(id) {
+    const idx = orderedIds.indexOf(id);
+    if (idx !== -1) orderedIds.splice(idx, 1);
   }
 
   function renderActions(card, t) {
     const btnBox = card.querySelector(`#opBtns-${t.id}`);
     if (!btnBox) return;
-
     btnBox.innerHTML = "";
+
     const st = String(t.status || "").toUpperCase();
 
     if (st === "DONE") {
@@ -359,24 +320,87 @@ async function loadLine(line) {
     }
   }
 
-  async function updatePartsOnly(ticketId) {
-    // Only update if the card exists on screen
+  function cardHtml(t) {
+    const sec = calcSeconds(t);
+    const partsHtml = partsCache.get(t.id) || "";
+
+    return `
+      <div class="cardTop">
+        <div class="pill">${t.station}</div>
+        <div class="timeBig"
+             data-timer="1"
+             data-created-at="${t.created_at || ""}"
+             data-status="${t.status || ""}"
+             data-done-at="${t.done_at || ""}"
+             data-confirmed-at="${t.confirmed_at || ""}"
+             data-duration-sec="${t.duration_sec ?? ""}">${formatSec(sec)}</div>
+      </div>
+
+      <div class="title">${t.priority} — ${t.status}</div>
+      <div class="desc">${t.description || ""}</div>
+
+      <div class="meta"><span style="opacity:.7;">Created</span><span>${fmtDateTime(t.created_at)}</span></div>
+      ${t.maint_comment ? `<div class="meta"><span style="opacity:.7;">Maint</span><span>${t.maint_comment}</span></div>` : ""}
+      ${t.operator_comment ? `<div class="meta"><span style="opacity:.7;">Operator</span><span>${t.operator_comment}</span></div>` : ""}
+
+      <div id="parts-${t.id}">${partsHtml}</div>
+
+      <div class="actions" id="opBtns-${t.id}" style="margin-top:10px;"></div>
+    `;
+  }
+
+  function applyTicketToCard(t, { moveToTop = false } = {}) {
+    const sec = calcSeconds(t);
+    let card = cardById.get(t.id);
+
+    if (!card) {
+      card = document.createElement("div");
+      cardById.set(t.id, card);
+      // insert at top by default
+      moveToTop = true;
+    }
+
+    card.className = `card ${urgencyClass(sec)}`;
+    card.innerHTML = cardHtml(t);
+    renderActions(card, t);
+
+    if (moveToTop) {
+      upsertOrderTop(t.id);
+      myEl.prepend(card);
+    } else {
+      // keep current DOM position; do nothing
+    }
+
+    ensureLimit30();
+  }
+
+  function removeTicket(id) {
+    const card = cardById.get(id);
+    if (card) card.remove();
+    cardById.delete(id);
+    partsCache.delete(id);
+    removeFromOrder(id);
+  }
+
+  async function updateParts(ticketId) {
+    // update only if card is visible
     const card = cardById.get(ticketId);
     if (!card) return;
 
-    // If not dirty, skip
-    if (!partsDirty.has(ticketId) && partsHtmlById.has(ticketId)) return;
-
-    const partsRows = await loadPartsForTicket(ticketId);
-    const html = partsListHtml(partsRows);
-    partsHtmlById.set(ticketId, html);
-    partsDirty.delete(ticketId);
+    const rows = await loadPartsForTicket(ticketId);
+    const html = partsListHtml(rows);
+    partsCache.set(ticketId, html);
 
     const partsEl = card.querySelector(`#parts-${ticketId}`);
     if (partsEl) partsEl.innerHTML = html;
   }
 
-  async function refreshMy() {
+  function needsPartsForStatus(status) {
+    const st = String(status || "").toUpperCase();
+    return st === "DONE" || st === "CONFIRMED" || st === "REOPENED";
+  }
+
+  async function initialLoad() {
     const { data, error } = await sb
       .from("tickets")
       .select("*")
@@ -386,69 +410,27 @@ async function loadLine(line) {
 
     if (error) console.error(error);
 
-    const rows = data || [];
-    const seen = new Set(rows.map((t) => t.id));
+    myEl.innerHTML = "";
+    cardById.clear();
+    partsCache.clear();
+    orderedIds.length = 0;
 
-    // Remove cards that disappeared from the top 30 list
-    for (const [id, el] of cardById.entries()) {
-      if (!seen.has(id)) {
-        el.remove();
-        cardById.delete(id);
-        snapById.delete(id);
-        // keep parts cache; harmless, but you can delete too if you want:
-        // partsHtmlById.delete(id);
-        partsDirty.delete(id);
-      }
+    for (const t of data || []) {
+      upsertOrderTop(t.id);
+      applyTicketToCard(t, { moveToTop: false });
+      if (needsPartsForStatus(t.status)) updateParts(t.id);
     }
 
-    // Render/update cards in correct order without nuking the whole container
+    // ensure correct order (newest first)
+    // (we already rendered in DB order newest->oldest with prepend disabled; fix DOM order once)
     const frag = document.createDocumentFragment();
-
-    for (const t of rows) {
-      const sec = calcSeconds(t);
-      const snap = ticketSnapshot(t);
-      const existing = cardById.get(t.id);
-
-      if (!existing) {
-        const card = document.createElement("div");
-        card.className = `card ${urgencyClass(sec)}`;
-        card.innerHTML = buildCardHtml(t);
-        renderActions(card, t);
-
-        cardById.set(t.id, card);
-        snapById.set(t.id, snap);
-
-        frag.appendChild(card);
-      } else {
-        // Update class (urgency) even if other fields unchanged (because duration can cross thresholds)
-        existing.className = `card ${urgencyClass(sec)}`;
-
-        if (snapById.get(t.id) !== snap) {
-          existing.innerHTML = buildCardHtml(t);
-          renderActions(existing, t);
-          snapById.set(t.id, snap);
-        }
-
-        frag.appendChild(existing);
-      }
-
-      // parts: fetch only when needed, and only when dirty / missing
-      if (needsParts(t)) {
-        if (!partsHtmlById.has(t.id) || partsDirty.has(t.id)) {
-          // do not await inside loop if you want it faster; but this is safe.
-          // We'll kick it off after DOM placement:
-          setTimeout(() => updatePartsOnly(t.id), 0);
-        }
-      } else {
-        // If ticket is not in DONE/CONFIRMED/REOPENED, don't show parts (and don't fetch)
-        const card = cardById.get(t.id);
-        const partsEl = card?.querySelector(`#parts-${t.id}`);
-        if (partsEl) partsEl.innerHTML = "";
-      }
+    for (const id of orderedIds) {
+      const el = cardById.get(id);
+      if (el) frag.appendChild(el);
     }
-
-    // Replace children with fragment (keeps elements; no flash)
     myEl.replaceChildren(frag);
+
+    ensureLimit30();
   }
 
   function openCreateTicketModal(line, station) {
@@ -509,29 +491,59 @@ async function loadLine(line) {
     };
   }
 
-  // initial render
-  refreshMy();
+  await initialLoad();
 
-  // Realtime-only (NO 2s polling)
+  // --- REALTIME: PATCH ONLY (NO refreshMy, NO interval) ---
   const ch = sb
     .channel(`line_${line}_live`)
     .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, (payload) => {
-      if (payload.new?.line === line || payload.old?.line === line) refreshMy();
+      const ev = payload.eventType;
+      const n = payload.new;
+      const o = payload.old;
+
+      // ignore other lines
+      const newLine = n?.line;
+      const oldLine = o?.line;
+      if (newLine !== line && oldLine !== line) return;
+
+      if (ev === "DELETE") {
+        if (o?.id) removeTicket(o.id);
+        return;
+      }
+
+      // INSERT / UPDATE
+      const t = n;
+      if (!t?.id) return;
+
+      // For INSERT, move to top
+      if (ev === "INSERT") {
+        applyTicketToCard(t, { moveToTop: true });
+        if (needsPartsForStatus(t.status)) updateParts(t.id);
+        return;
+      }
+
+      // UPDATE: update only this card; keep order unless it is newer than current top
+      applyTicketToCard(t, { moveToTop: false });
+
+      // If status where parts matter, update only parts section
+      if (needsPartsForStatus(t.status)) updateParts(t.id);
+      else {
+        // clear parts for non-relevant statuses
+        partsCache.set(t.id, "");
+        const card = cardById.get(t.id);
+        const partsEl = card?.querySelector(`#parts-${t.id}`);
+        if (partsEl) partsEl.innerHTML = "";
+      }
     })
     .on("postgres_changes", { event: "*", schema: "public", table: "ticket_parts" }, (payload) => {
       const tid = payload?.new?.ticket_id ?? payload?.old?.ticket_id;
-      if (tid) {
-        partsDirty.add(tid);
-        // Update only the parts area for that ticket (no full flash)
-        updatePartsOnly(tid);
-      } else {
-        // fallback
-        refreshMy();
-      }
+      if (!tid) return;
+      // update only that ticket's parts area
+      updateParts(tid);
     })
     .subscribe();
 
-  activeRealtimeChannel = ch;
+  activeChannels.push(ch);
 }
 
 // ====== MAINTENANCE BOARD ======
@@ -911,7 +923,7 @@ async function loadMaintenance() {
     .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
     .subscribe();
 
-  activeRealtimeChannel = ch;
+  activeChannels.push(ch);
 
   searchEl.addEventListener("input", render);
   lineEl.addEventListener("change", render);
@@ -1000,7 +1012,7 @@ async function loadMonitor() {
     .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
     .subscribe();
 
-  activeRealtimeChannel = ch;
+  activeChannels.push(ch);
 }
 
 // ====== PARTS / STOCK SCREEN (EDITABLE) ======
@@ -1136,7 +1148,11 @@ async function loadPartsScreen() {
         return;
       }
 
-      const { data: inserted, error: pErr } = await sb.from("spare_parts").insert({ part_no, part_name, uom, is_active: true }).select("id").single();
+      const { data: inserted, error: pErr } = await sb
+        .from("spare_parts")
+        .insert({ part_no, part_name, uom, is_active: true })
+        .select("id")
+        .single();
 
       if (pErr) {
         console.error(pErr);
@@ -1144,7 +1160,9 @@ async function loadPartsScreen() {
         return;
       }
 
-      const { error: sErr } = await sb.from("stock").insert({ part_id: inserted.id, qty, min_qty, location: location || null });
+      const { error: sErr } = await sb
+        .from("stock")
+        .insert({ part_id: inserted.id, qty, min_qty, location: location || null });
 
       if (sErr) {
         console.error(sErr);
@@ -1325,13 +1343,15 @@ async function loadPartsScreen() {
 
   render();
 
-  // Keep both channels, but store only one "activeRealtimeChannel" for cleanup.
-  // We'll bundle both into one combined channel so cleanup works cleanly.
-  const ch = sb
-    .channel("parts_live_all")
+  const ch1 = sb
+    .channel("parts_live_spare_parts")
     .on("postgres_changes", { event: "*", schema: "public", table: "spare_parts" }, render)
+    .subscribe();
+
+  const ch2 = sb
+    .channel("parts_live_stock")
     .on("postgres_changes", { event: "*", schema: "public", table: "stock" }, render)
     .subscribe();
 
-  activeRealtimeChannel = ch;
+  activeChannels.push(ch1, ch2);
 }
