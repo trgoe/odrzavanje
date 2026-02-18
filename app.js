@@ -9,7 +9,7 @@ console.log("maintenance app.js loaded");
 
 // ====== CONFIG ======
 const SUPABASE_URL = "https://hfyvjtaumvmaqeqkmiyk.supabase.co";
-const SUPABASE_KEY = "YOUR_ANON_KEY_HERE"; // <-- keep yours
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmVhc2UiLCJyZWYiOiJoZnl2anRhdW12bWFxZXFrbWl5ayIsInJvbGUiOiJhbm9uIiwiaWF0IjoxNzcxMjQ4MTU5LCJleHAiOjIwODY4MjQxNTl9.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
 const YELLOW_AFTER_MIN = 5;
 const RED_AFTER_MIN = 10;
 
@@ -1143,3 +1143,4 @@ async function loadPartsScreen() {
 
 // ====== START ======
 router();
+
