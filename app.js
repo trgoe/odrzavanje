@@ -354,33 +354,14 @@ async function loadLine(line) {
       </div>
     `);
 
-    modal.el.querySelector("#cancel").onclick = modal.close;
-
-    modal.el.querySelector("#send").onclick = async () => {
-      const prio = modal.el.querySelector("#prio").value;
-      const issue = modal.el.querySelector("#issue").value.trim();
-      const desc = modal.el.querySelector("#desc").value.trim();
-
-      if (!desc) { alert("Description required."); return; }
-
-      const { error } = await sb.from("tickets").insert({
-        line,
-        station,
-        priority: prio,
-        issue_type: issue || null,
-        description: desc,
-        status: "NEW",
-        created_at: new Date().toISOString(),
-      });
-
-      if (error) {
-        console.error(error);
-        alert("Failed to create ticket");
-      } else {
-        modal.close();
-      }
-    };
+     if (error) {
+    console.error(error);
+    alert("Failed to create ticket");
+  } else {
+    modal.close();
+    refreshMy(); //
   }
+
 
   // initial load
   refreshMy();
@@ -1136,3 +1117,4 @@ async function loadPartsScreen() {
     .on("postgres_changes", { event: "*", schema: "public", table: "stock" }, render)
     .subscribe();
 }
+
