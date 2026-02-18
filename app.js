@@ -1,3 +1,10 @@
+// ====== LOAD GUARD (prevents duplicate app.js instances) ======
+if (window.__MAINT_APP_LOADED__) {
+  console.warn("maintenance app.js loaded twice — aborting second load");
+  throw new Error("app.js loaded twice");
+}
+window.__MAINT_APP_LOADED__ = true;
+
 console.log("maintenance app.js loaded");
 
 // ====== CONFIG ======
@@ -11,7 +18,6 @@ const RED_AFTER_MIN = 10;
 // ====== INIT ======
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
-const route = location.hash || "#maintenance";
 
 // ====== TIME HELPERS ======
 function parseTs(ts) {
@@ -105,8 +111,10 @@ function updateTimersOnly() {
     el.textContent = formatSec(sec);
   });
 }
+
 // One global ticker for any screen that has timer elements
-setInterval(updateTimersOnly, 1000);
+if (window.__MAINT_TIMER_INTERVAL) clearInterval(window.__MAINT_TIMER_INTERVAL);
+window.__MAINT_TIMER_INTERVAL = setInterval(updateTimersOnly, 1000);
 
 // ====== CSV HELPERS ======
 function escCsv(v) {
@@ -164,11 +172,27 @@ function partsListHtml(partsRows) {
   return `<div style="margin-top:8px;">${lines.join("")}</div>`;
 }
 
-// ====== ROUTING ======
-if (route.startsWith("#line/")) loadLine(route.split("/")[1]);
-else if (route.startsWith("#monitor")) loadMonitor();
-else if (route.startsWith("#parts")) loadPartsScreen();
-else loadMaintenance();
+// ====== ROUTER + CLEANUP ======
+async function cleanupActive() {
+  if (window.__lineChannel) { try { await sb.removeChannel(window.__lineChannel); } catch (e) {} window.__lineChannel = null; }
+  if (window.__maintenanceChannel) { try { await sb.removeChannel(window.__maintenanceChannel); } catch (e) {} window.__maintenanceChannel = null; }
+  if (window.__monitorChannel) { try { await sb.removeChannel(window.__monitorChannel); } catch (e) {} window.__monitorChannel = null; }
+  if (window.__partsChannel1) { try { await sb.removeChannel(window.__partsChannel1); } catch (e) {} window.__partsChannel1 = null; }
+  if (window.__partsChannel2) { try { await sb.removeChannel(window.__partsChannel2); } catch (e) {} window.__partsChannel2 = null; }
+}
+
+async function router() {
+  await cleanupActive();
+
+  const r = location.hash || "#maintenance";
+  if (r.startsWith("#line/")) return loadLine(r.split("/")[1]);
+  if (r.startsWith("#monitor")) return loadMonitor();
+  if (r.startsWith("#parts")) return loadPartsScreen();
+  return loadMaintenance();
+}
+
+window.addEventListener("hashchange", router);
+router();
 
 // ====== OPERATOR (LINE) ======
 async function loadLine(line) {
@@ -218,6 +242,7 @@ async function loadLine(line) {
   });
 
   async function refreshMy() {
+    // console.count("refreshMy"); // uncomment for debug
     const { data, error } = await sb
       .from("tickets")
       .select("*")
@@ -357,44 +382,38 @@ async function loadLine(line) {
     };
   }
 
-refreshMy();
+  // initial load
+  refreshMy();
 
-// Debounce + prevent overlapping refreshes
-let refreshInFlight = false;
-let refreshQueued = false;
-let refreshTimer = null;
+  // Debounce + prevent overlapping refreshes
+  let refreshInFlight = false;
+  let refreshQueued = false;
+  let refreshTimer = null;
 
-async function safeRefresh() {
-  if (refreshInFlight) { refreshQueued = true; return; }
-  refreshInFlight = true;
-  try {
-    await refreshMy();
-  } finally {
-    refreshInFlight = false;
-    if (refreshQueued) { refreshQueued = false; safeRefresh(); }
+  async function safeRefresh() {
+    if (refreshInFlight) { refreshQueued = true; return; }
+    refreshInFlight = true;
+    try { await refreshMy(); }
+    finally {
+      refreshInFlight = false;
+      if (refreshQueued) { refreshQueued = false; safeRefresh(); }
+    }
   }
-}
 
-function scheduleRefresh() {
-  clearTimeout(refreshTimer);
-  refreshTimer = setTimeout(safeRefresh, 150);
-}
+  function scheduleRefresh() {
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(safeRefresh, 150);
+  }
 
-// cleanup old channel (prevents stacking)
-if (window.__lineChannel) {
-  try { await sb.removeChannel(window.__lineChannel); } catch (e) {}
-  window.__lineChannel = null;
-}
-
-// Realtime only for THIS line (stored globally)
-window.__lineChannel = sb
-  .channel(`line_${line}_tickets`)
-  .on(
-    "postgres_changes",
-    { event: "*", schema: "public", table: "tickets", filter: `line=eq.${line}` },
-    scheduleRefresh
-  )
-  .subscribe();
+  // Realtime only for THIS line
+  window.__lineChannel = sb
+    .channel(`line_${line}_tickets`)
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "tickets", filter: `line=eq.${line}` },
+      scheduleRefresh
+    )
+    .subscribe();
 }
 
 // ====== MAINTENANCE BOARD ======
@@ -735,8 +754,8 @@ async function loadMaintenance() {
   syncDateInputs();
   render();
 
-  // Realtime updates only (NO 2s polling → stops the “refresh” feeling)
-  sb.channel("tickets_maintenance")
+  // Realtime updates
+  window.__maintenanceChannel = sb.channel("tickets_maintenance")
     .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
     .subscribe();
 
@@ -808,7 +827,7 @@ async function loadMonitor() {
 
   render();
 
-  sb.channel("tickets_monitor")
+  window.__monitorChannel = sb.channel("tickets_monitor")
     .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
     .subscribe();
 }
@@ -1109,14 +1128,11 @@ async function loadPartsScreen() {
 
   render();
 
-  sb.channel("parts_live_spare_parts")
+  window.__partsChannel1 = sb.channel("parts_live_spare_parts")
     .on("postgres_changes", { event: "*", schema: "public", table: "spare_parts" }, render)
     .subscribe();
 
-  sb.channel("parts_live_stock")
+  window.__partsChannel2 = sb.channel("parts_live_stock")
     .on("postgres_changes", { event: "*", schema: "public", table: "stock" }, render)
     .subscribe();
 }
-
-
-
