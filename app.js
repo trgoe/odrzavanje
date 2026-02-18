@@ -5,7 +5,7 @@ console.log("maintenance app.js loaded");
 // Supabase Dashboard → Settings → API
 const SUPABASE_URL = "https://hfyvjtaumvmaqeqkmiyk.supabase.co";
 const SUPABASE_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmVyYmFzZSIsInJlZiI6ImhmeXZqdGF1bXZtYXFlcWttaXlrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEyNDgxNTksImV4cCI6MjA4NjgyNDE1OX0.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhmeXZqdGF1bXZtYXFlcWttaXlrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEyNDgxNTksImV4cCI6MjA4NjgyNDE1OX0.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
 
 const YELLOW_AFTER_MIN = 5;
 const RED_AFTER_MIN = 10;
@@ -1101,3 +1101,4 @@ async function loadPartsScreen() {
     .on("postgres_changes", { event: "*", schema: "public", table: "stock" }, render)
     .subscribe();
 }
+
