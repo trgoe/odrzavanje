@@ -1,21 +1,53 @@
-// ====== LOAD GUARD (prevents duplicate app.js instances) ======
-if (window.__MAINT_APP_LOADED__) {
-  console.warn("maintenance app.js loaded twice — aborting second load");
-  throw new Error("app.js loaded twice");
-}
-window.__MAINT_APP_LOADED__ = true;
+/* ===========================
+   Maintenance App (No Flicker)
+   - Single active screen subscription (auto-unsub on route change)
+   - No setInterval(render, ...)
+   - Timers update locally every 1s (no refetch)
+   - Screens: #maintenance (default), #line/L1, #monitor, #parts
+   - CSV export with presets + custom date range
+   - Parts usage on DONE via RPC apply_ticket_parts()
+   =========================== */
 
 console.log("maintenance app.js loaded");
 
 // ====== CONFIG ======
 const SUPABASE_URL = "https://hfyvjtaumvmaqeqkmiyk.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmVhc2UiLCJyZWYiOiJoZnl2anRhdW12bWFxZXFrbWl5ayIsInJvbGUiOiJhbm9uIiwiaWF0IjoxNzcxMjQ4MTU5LCJleHAiOjIwODY4MjQxNTl9.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
+const SUPABASE_KEY = "YOUR_ANON_KEY_HERE"; // <-- keep your real key here
+
 const YELLOW_AFTER_MIN = 5;
 const RED_AFTER_MIN = 10;
 
 // ====== INIT ======
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
+
+// ====== SAFE SUBSCRIPTIONS (NO STACKING) ======
+let activeSubs = [];
+function clearSubs() {
+  for (const ch of activeSubs) {
+    try { sb.removeChannel(ch); } catch (e) {}
+  }
+  activeSubs = [];
+}
+function addSub(ch) { activeSubs.push(ch); }
+
+// ====== ROUTER ======
+function getRoute() {
+  return location.hash || "#maintenance";
+}
+
+function routeTo() {
+  const route = getRoute();
+  clearSubs();
+
+  if (route.startsWith("#line/")) loadLine(route.split("/")[1]);
+  else if (route.startsWith("#monitor")) loadMonitor();
+  else if (route.startsWith("#parts")) loadPartsScreen();
+  else loadMaintenance();
+}
+
+window.addEventListener("hashchange", routeTo);
+routeTo();
 
 // ====== TIME HELPERS ======
 function parseTs(ts) {
@@ -84,9 +116,7 @@ function secondsFromDataset(el) {
   if (!start) return null;
 
   const dur = el.dataset.durationSec;
-  if (dur != null && dur !== "" && Number.isFinite(Number(dur))) {
-    return Number(dur);
-  }
+  if (dur != null && dur !== "" && Number.isFinite(Number(dur))) return Number(dur);
 
   const status = (el.dataset.status || "").toUpperCase();
   const doneAt = el.dataset.doneAt;
@@ -106,9 +136,7 @@ function updateTimersOnly() {
     el.textContent = formatSec(sec);
   });
 }
-
-if (window.__MAINT_TIMER_INTERVAL) clearInterval(window.__MAINT_TIMER_INTERVAL);
-window.__MAINT_TIMER_INTERVAL = setInterval(updateTimersOnly, 1000);
+setInterval(updateTimersOnly, 1000);
 
 // ====== CSV HELPERS ======
 function escCsv(v) {
@@ -166,30 +194,6 @@ function partsListHtml(partsRows) {
   return `<div style="margin-top:8px;">${lines.join("")}</div>`;
 }
 
-// ====== ROUTER + CLEANUP ======
-async function cleanupActive() {
-  if (window.__linePoll) { clearInterval(window.__linePoll); window.__linePoll = null; }
-  if (window.__maintenancePoll) { clearInterval(window.__maintenancePoll); window.__maintenancePoll = null; }
-  if (window.__monitorPoll) { clearInterval(window.__monitorPoll); window.__monitorPoll = null; }
-
-  if (window.__lineChannel) { try { await sb.removeChannel(window.__lineChannel); } catch (e) {} window.__lineChannel = null; }
-  if (window.__maintenanceChannel) { try { await sb.removeChannel(window.__maintenanceChannel); } catch (e) {} window.__maintenanceChannel = null; }
-  if (window.__monitorChannel) { try { await sb.removeChannel(window.__monitorChannel); } catch (e) {} window.__monitorChannel = null; }
-  if (window.__partsChannel1) { try { await sb.removeChannel(window.__partsChannel1); } catch (e) {} window.__partsChannel1 = null; }
-  if (window.__partsChannel2) { try { await sb.removeChannel(window.__partsChannel2); } catch (e) {} window.__partsChannel2 = null; }
-}
-
-async function router() {
-  await cleanupActive();
-  const r = location.hash || "#maintenance";
-  if (r.startsWith("#line/")) return loadLine(r.split("/")[1]);
-  if (r.startsWith("#monitor")) return loadMonitor();
-  if (r.startsWith("#parts")) return loadPartsScreen();
-  return loadMaintenance();
-}
-
-window.addEventListener("hashchange", router);
-
 // ====== OPERATOR (LINE) ======
 async function loadLine(line) {
   app.innerHTML = `
@@ -237,6 +241,61 @@ async function loadLine(line) {
     stationsEl.appendChild(btn);
   });
 
+  function openCreateTicketModal(line, station) {
+    const modal = showModal(`
+      <div class="card" style="width:min(560px,92vw);">
+        <div style="font-weight:1000;font-size:20px;">New ticket — ${line} / ${station}</div>
+        <div style="height:10px;"></div>
+
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <select id="prio" class="select" style="min-width:160px;">
+            <option value="LOW">LOW</option>
+            <option value="MED" selected>MED</option>
+            <option value="HIGH">HIGH</option>
+          </select>
+
+          <input id="issue" class="input" placeholder="Issue type (optional)" style="flex:1;min-width:180px;" />
+        </div>
+
+        <div style="height:10px;"></div>
+        <textarea id="desc" placeholder="Describe problem… (required)"></textarea>
+
+        <div style="height:10px;"></div>
+        <div style="display:flex;gap:10px;">
+          <button id="cancel" class="btn">Cancel</button>
+          <button id="send" class="btn btnBlue" style="flex:1;">SEND</button>
+        </div>
+      </div>
+    `);
+
+    modal.el.querySelector("#cancel").onclick = modal.close;
+
+    modal.el.querySelector("#send").onclick = async () => {
+      const prio = modal.el.querySelector("#prio").value;
+      const issue = modal.el.querySelector("#issue").value.trim();
+      const desc = modal.el.querySelector("#desc").value.trim();
+
+      if (!desc) { alert("Description required."); return; }
+
+      const { error } = await sb.from("tickets").insert({
+        line,
+        station,
+        priority: prio,
+        issue_type: issue || null,
+        description: desc,
+        status: "NEW",
+        created_at: new Date().toISOString(),
+      });
+
+      if (error) {
+        console.error(error);
+        alert("Failed to create ticket");
+      } else {
+        modal.close();
+      }
+    };
+  }
+
   async function refreshMy() {
     const { data, error } = await sb
       .from("tickets")
@@ -248,7 +307,6 @@ async function loadLine(line) {
     if (error) console.error(error);
 
     myEl.innerHTML = "";
-
     for (const t of (data || [])) {
       const sec = calcSeconds(t);
       const partsRows = await loadPartsForTicket(t.id);
@@ -322,97 +380,15 @@ async function loadLine(line) {
     }
   }
 
-  function openCreateTicketModal(line, station) {
-    const modal = showModal(`
-      <div class="card" style="width:min(560px,92vw);">
-        <div style="font-weight:1000;font-size:20px;">New ticket — ${line} / ${station}</div>
-        <div style="height:10px;"></div>
-
-        <div style="display:flex;gap:10px;flex-wrap:wrap;">
-          <select id="prio" class="select" style="min-width:160px;">
-            <option value="LOW">LOW</option>
-            <option value="MED" selected>MED</option>
-            <option value="HIGH">HIGH</option>
-          </select>
-
-          <input id="issue" class="input" placeholder="Issue type (optional)" style="flex:1;min-width:180px;" />
-        </div>
-
-        <div style="height:10px;"></div>
-        <textarea id="desc" placeholder="Describe problem… (required)"></textarea>
-
-        <div style="height:10px;"></div>
-        <div style="display:flex;gap:10px;">
-          <button id="cancel" class="btn">Cancel</button>
-          <button id="send" class="btn btnBlue" style="flex:1;">SEND</button>
-        </div>
-      </div>
-    `);
-
-    modal.el.querySelector("#cancel").onclick = modal.close;
-
-    modal.el.querySelector("#send").onclick = async () => {
-      const prio = modal.el.querySelector("#prio").value;
-      const issue = modal.el.querySelector("#issue").value.trim();
-      const desc = modal.el.querySelector("#desc").value.trim();
-
-      if (!desc) { alert("Description required."); return; }
-
-      const { error } = await sb.from("tickets").insert({
-        line,
-        station,
-        priority: prio,
-        issue_type: issue || null,
-        description: desc,
-        status: "NEW",
-        created_at: new Date().toISOString(),
-      });
-
-      if (error) {
-        console.error(error);
-        alert("Failed to create ticket");
-      } else {
-        modal.close();
-        refreshMy(); // ✅ instant local update
-      }
-    };
-  }
-
-  // initial load
   await refreshMy();
 
-  // Debounce + prevent overlapping refreshes
-  let refreshInFlight = false;
-  let refreshQueued = false;
-  let refreshTimer = null;
-
-  async function safeRefresh() {
-    if (refreshInFlight) { refreshQueued = true; return; }
-    refreshInFlight = true;
-    try { await refreshMy(); }
-    finally {
-      refreshInFlight = false;
-      if (refreshQueued) { refreshQueued = false; safeRefresh(); }
-    }
-  }
-
-  function scheduleRefresh() {
-    clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(safeRefresh, 150);
-  }
-
-  // Realtime only for THIS line
-  window.__lineChannel = sb
-    .channel(`line_${line}_tickets`)
-    .on(
-      "postgres_changes",
-      { event: "*", schema: "public", table: "tickets", filter: `line=eq.${line}` },
-      scheduleRefresh
-    )
+  // Real-time refresh ONLY (no polling)
+  const ch = sb.channel(`line_${line}_tickets`)
+    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, (payload) => {
+      if (payload.new?.line === line || payload.old?.line === line) refreshMy();
+    })
     .subscribe();
-
-  // fallback poll (handles cases where realtime doesn't fire)
-  window.__linePoll = setInterval(scheduleRefresh, 3000);
+  addSub(ch);
 }
 
 // ====== MAINTENANCE BOARD ======
@@ -444,6 +420,7 @@ async function loadMaintenance() {
 
       <a class="btn" href="#monitor">Monitor</a>
       <a class="btn" href="#parts">Spare Parts</a>
+      <a class="btn" href="#line/L1">Line L1</a>
     </div>
 
     <div class="board">
@@ -752,15 +729,15 @@ async function loadMaintenance() {
   syncDateInputs();
   await render();
 
-  window.__maintenanceChannel = sb
-    .channel("tickets_maintenance")
-    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
+  // Real-time updates ONLY (no polling). Also ignore our own UI updates noise by just re-rendering once per change.
+  const ch = sb.channel("tickets_maintenance")
+    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, () => render())
     .subscribe();
-
-  window.__maintenancePoll = setInterval(render, 3000);
+  addSub(ch);
 
   searchEl.addEventListener("input", render);
   lineEl.addEventListener("change", render);
+
   presetEl.addEventListener("change", () => { syncDateInputs(); render(); });
   fromEl.addEventListener("change", () => { presetEl.value = "custom"; syncDateInputs(); render(); });
   toEl.addEventListener("change", () => { presetEl.value = "custom"; syncDateInputs(); render(); });
@@ -803,7 +780,6 @@ async function loadMonitor() {
 
       const card = document.createElement("div");
       card.className = `card ${urgencyClass(sec)}`;
-
       card.innerHTML = `
         <div class="cardTop">
           <div class="pill">${t.line}</div>
@@ -826,15 +802,13 @@ async function loadMonitor() {
 
   await render();
 
-  window.__monitorChannel = sb
-    .channel("tickets_monitor")
-    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, render)
+  const ch = sb.channel("tickets_monitor")
+    .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, () => render())
     .subscribe();
-
-  window.__monitorPoll = setInterval(render, 3000);
+  addSub(ch);
 }
 
-// ====== PARTS / STOCK SCREEN (EDITABLE) ======
+// ====== PARTS / STOCK SCREEN ======
 async function loadPartsScreen() {
   const state = { q: "", onlyActive: true };
 
@@ -844,6 +818,7 @@ async function loadPartsScreen() {
     <div class="topbar" style="flex-wrap:wrap;">
       <a class="btn" href="#maintenance">Maintenance</a>
       <a class="btn" href="#monitor">Monitor</a>
+      <a class="btn" href="#line/L1">Line L1</a>
 
       <input id="search" class="input" placeholder="Search part no / name..." style="min-width:220px;" />
 
@@ -1130,17 +1105,13 @@ async function loadPartsScreen() {
 
   await render();
 
-  window.__partsChannel1 = sb
-    .channel("parts_live_spare_parts")
-    .on("postgres_changes", { event: "*", schema: "public", table: "spare_parts" }, render)
+  const ch1 = sb.channel("parts_live_spare_parts")
+    .on("postgres_changes", { event: "*", schema: "public", table: "spare_parts" }, () => render())
     .subscribe();
+  addSub(ch1);
 
-  window.__partsChannel2 = sb
-    .channel("parts_live_stock")
-    .on("postgres_changes", { event: "*", schema: "public", table: "stock" }, render)
+  const ch2 = sb.channel("parts_live_stock")
+    .on("postgres_changes", { event: "*", schema: "public", table: "stock" }, () => render())
     .subscribe();
+  addSub(ch2);
 }
-
-// ====== START ======
-router();
-
