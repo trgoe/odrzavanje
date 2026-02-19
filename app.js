@@ -12,7 +12,6 @@ const RED_AFTER_MIN = 10;
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
-// Ensure we don't keep multiple realtime subscriptions alive when navigating
 let activeChannels = [];
 function cleanupRealtime() {
   try {
@@ -59,13 +58,11 @@ function urgencyClass(sec) {
   return "uGreen";
 }
 
-// freeze logic from ticket object
 function calcSeconds(t) {
   const startD = parseTs(t?.created_at);
   if (!startD) return null;
   const start = startD.getTime();
 
-  // frozen duration
   if (t.duration_sec != null && Number.isFinite(Number(t.duration_sec))) {
     return Number(t.duration_sec);
   }
@@ -73,7 +70,6 @@ function calcSeconds(t) {
   const st = String(t.status || "").toUpperCase();
   let stopD = null;
 
-  // stop time preference: confirmed > done
   if ((st === "CONFIRMED" || st === "REOPENED") && t.confirmed_at) stopD = parseTs(t.confirmed_at);
   if (!stopD && (st === "DONE" || st === "CONFIRMED" || st === "REOPENED") && t.done_at)
     stopD = parseTs(t.done_at);
@@ -90,7 +86,6 @@ function secondsFromDataset(el) {
   const start = parseTs(createdAt)?.getTime();
   if (!start) return null;
 
-  // frozen duration if present
   const dur = el.dataset.durationSec;
   if (dur != null && dur !== "" && Number.isFinite(Number(dur))) {
     return Number(dur);
@@ -188,7 +183,6 @@ function partsListHtml(partsRows) {
 // ====== ROUTING ======
 function routeTo() {
   cleanupRealtime();
-
   const r = location.hash || "#maintenance";
   if (r.startsWith("#line/")) loadLine(r.split("/")[1]);
   else if (r.startsWith("#monitor")) loadMonitor();
@@ -246,9 +240,9 @@ async function loadLine(line) {
   });
 
   // --- PATCH STATE ---
-  const cardById = new Map(); // ticketId -> DOM
-  const partsCache = new Map(); // ticketId -> parts html
-  const ticketsById = new Map(); // ticketId -> cached ticket (merged)
+  const cardById = new Map();
+  const partsCache = new Map();
+  const ticketsById = new Map();
 
   function needsParts(status) {
     const st = String(status || "").toUpperCase();
@@ -273,12 +267,8 @@ async function loadLine(line) {
           .update({ status: "CONFIRMED", confirmed_at: nowIso })
           .eq("id", t.id);
 
-        if (error) {
-          console.error(error);
-          return;
-        }
+        if (error) { console.error(error); return; }
 
-        // Optimistic UI update
         const prev = ticketsById.get(t.id) || t;
         const merged = { ...prev, status: "CONFIRMED", confirmed_at: nowIso };
         ticketsById.set(t.id, merged);
@@ -303,12 +293,8 @@ async function loadLine(line) {
           })
           .eq("id", t.id);
 
-        if (error) {
-          console.error(error);
-          return;
-        }
+        if (error) { console.error(error); return; }
 
-        // Optimistic UI update
         const prev = ticketsById.get(t.id) || t;
         const merged = {
           ...prev,
@@ -361,7 +347,6 @@ async function loadLine(line) {
   function upsertCard(t, { placeTop = false } = {}) {
     if (!t?.id) return;
 
-    // cache merged ticket
     const prev = ticketsById.get(t.id) || {};
     const merged = { ...prev, ...t };
     ticketsById.set(t.id, merged);
@@ -379,10 +364,9 @@ async function loadLine(line) {
       if (placeTop) myEl.prepend(card);
       else myEl.appendChild(card);
     } else {
-      // preserve current parts HTML
+      // Preserve existing parts HTML before rebuilding inner HTML
       const partsEl = card.querySelector(`#parts-${merged.id}`);
-      const existingParts = partsEl ? partsEl.innerHTML : partsCache.get(merged.id) || "";
-      partsCache.set(merged.id, existingParts);
+      if (partsEl) partsCache.set(merged.id, partsEl.innerHTML);
 
       card.className = `card ${urgencyClass(sec)}`;
       card.innerHTML = cardHtml(merged);
@@ -426,28 +410,7 @@ async function loadLine(line) {
     if (partsEl) partsEl.innerHTML = html;
   }
 
-  // ---- Initial load (ONE fetch, render all) ----
-  const { data: tickets, error: tErr } = await sb
-    .from("tickets")
-    .select("*")
-    .eq("line", line)
-    .order("created_at", { ascending: false })
-    .limit(30);
-
-  if (tErr) console.error(tErr);
-
-  myEl.innerHTML = "";
-  cardById.clear();
-  partsCache.clear();
-  ticketsById.clear();
-
-  (tickets || []).forEach((t) => {
-    ticketsById.set(t.id, t);
-    upsertCard(t, { placeTop: false });
-    if (needsParts(t.status)) updateParts(t.id);
-  });
-
-  // ---- Realtime: PATCH ONLY + merge partial updates ----
+  // ---- Subscribe FIRST so no INSERT events are missed during the initial fetch ----
   const ch = sb
     .channel(`line_${line}_live`)
     .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, (payload) => {
@@ -459,7 +422,6 @@ async function loadLine(line) {
 
       const alreadyShown = cardById.has(id);
 
-      // If we are not already showing it, require line match
       if (!alreadyShown) {
         const newLine = n.line;
         const oldLine = o.line;
@@ -471,7 +433,6 @@ async function loadLine(line) {
         return;
       }
 
-      // Merge partial update into cached ticket
       const prev = ticketsById.get(id) || {};
       const merged = { ...prev, ...n };
       ticketsById.set(id, merged);
@@ -496,6 +457,27 @@ async function loadLine(line) {
     .subscribe();
 
   activeChannels.push(ch);
+
+  // ---- Initial load (after subscribing so no events are missed) ----
+  const { data: tickets, error: tErr } = await sb
+    .from("tickets")
+    .select("*")
+    .eq("line", line)
+    .order("created_at", { ascending: false })
+    .limit(30);
+
+  if (tErr) console.error(tErr);
+
+  myEl.innerHTML = "";
+  cardById.clear();
+  partsCache.clear();
+  ticketsById.clear();
+
+  (tickets || []).forEach((t) => {
+    ticketsById.set(t.id, t);
+    upsertCard(t, { placeTop: false });
+    if (needsParts(t.status)) updateParts(t.id);
+  });
 
   // ---- Modal ----
   function openCreateTicketModal(line, station) {
@@ -631,8 +613,7 @@ async function loadMaintenance() {
     const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 0, 0, 0, 0);
     const endOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
 
-    let from = null,
-      to = null;
+    let from = null, to = null;
 
     if (preset === "today") {
       from = startOfToday;
@@ -717,9 +698,7 @@ async function loadMaintenance() {
         .from("tickets")
         .update({ status: "TAKEN", taken_at: new Date().toISOString(), taken_by: name || null })
         .eq("id", t.id);
-
       if (error) console.error(error);
-      else render(); // optimistic refresh for maintenance board
     };
 
     const doneBtn = document.createElement("button");
@@ -739,10 +718,7 @@ async function loadMaintenance() {
 
       try {
         if (raw && raw.trim()) {
-          const pairs = raw
-            .split(",")
-            .map((x) => x.trim())
-            .filter(Boolean);
+          const pairs = raw.split(",").map((x) => x.trim()).filter(Boolean);
           const items = [];
 
           for (const p of pairs) {
@@ -791,7 +767,6 @@ async function loadMaintenance() {
           .eq("id", t.id);
 
         if (error) console.error(error);
-        else render(); // optimistic refresh
       } catch (e) {
         console.error(e);
         alert(`Error: ${e?.message || e}`);
@@ -821,10 +796,7 @@ async function loadMaintenance() {
     if (state.line !== "ALL") q = q.eq("line", state.line);
 
     const { data, error } = await q;
-    if (error) {
-      console.error(error);
-      return;
-    }
+    if (error) { console.error(error); return; }
 
     let rows = data || [];
 
@@ -878,11 +850,7 @@ async function loadMaintenance() {
     if (state.line && state.line !== "ALL") q = q.eq("line", state.line);
 
     const { data, error } = await q;
-    if (error) {
-      console.error(error);
-      alert("Export failed");
-      return;
-    }
+    if (error) { console.error(error); alert("Export failed"); return; }
 
     let rows = data || [];
     if (state.q) {
@@ -895,21 +863,9 @@ async function loadMaintenance() {
     }
 
     const cols = [
-      "id",
-      "line",
-      "station",
-      "priority",
-      "issue_type",
-      "description",
-      "status",
-      "created_at",
-      "taken_at",
-      "done_at",
-      "confirmed_at",
-      "taken_by",
-      "maint_comment",
-      "operator_comment",
-      "duration_sec",
+      "id", "line", "station", "priority", "issue_type", "description", "status",
+      "created_at", "taken_at", "done_at", "confirmed_at", "taken_by",
+      "maint_comment", "operator_comment", "duration_sec",
     ];
     const csv = [cols.join(","), ...rows.map((r) => cols.map((c) => escCsv(r[c])).join(","))].join("\n");
 
@@ -940,20 +896,9 @@ async function loadMaintenance() {
   searchEl.addEventListener("input", render);
   lineEl.addEventListener("change", render);
 
-  presetEl.addEventListener("change", () => {
-    syncDateInputs();
-    render();
-  });
-  fromEl.addEventListener("change", () => {
-    presetEl.value = "custom";
-    syncDateInputs();
-    render();
-  });
-  toEl.addEventListener("change", () => {
-    presetEl.value = "custom";
-    syncDateInputs();
-    render();
-  });
+  presetEl.addEventListener("change", () => { syncDateInputs(); render(); });
+  fromEl.addEventListener("change", () => { presetEl.value = "custom"; syncDateInputs(); render(); });
+  toEl.addEventListener("change", () => { presetEl.value = "custom"; syncDateInputs(); render(); });
 }
 
 // ====== MONITOR ======
@@ -981,10 +926,7 @@ async function loadMonitor() {
       .neq("status", "CONFIRMED")
       .order("created_at", { ascending: true });
 
-    if (error) {
-      console.error(error);
-      return;
-    }
+    if (error) { console.error(error); return; }
 
     const items = (data || [])
       .map((t) => ({ t, sec: calcSeconds(t) }))
@@ -1082,10 +1024,7 @@ async function loadPartsScreen() {
       .select("qty,min_qty,location, spare_parts(id,part_no,part_name,uom,is_active)")
       .order("qty", { ascending: true });
 
-    if (error) {
-      console.error(error);
-      return [];
-    }
+    if (error) { console.error(error); return []; }
 
     let rows = (data || [])
       .map((r) => ({ qty: r.qty, min_qty: r.min_qty, location: r.location, part: r.spare_parts }))
@@ -1147,18 +1086,9 @@ async function loadPartsScreen() {
       const min_qty = Number(modal.el.querySelector("#min_qty").value || 0);
       const location = modal.el.querySelector("#location").value.trim();
 
-      if (!part_no || !part_name) {
-        alert("Part No and Part name are required.");
-        return;
-      }
-      if (!Number.isFinite(qty) || qty < 0) {
-        alert("Qty must be 0 or more.");
-        return;
-      }
-      if (!Number.isFinite(min_qty) || min_qty < 0) {
-        alert("Min Qty must be 0 or more.");
-        return;
-      }
+      if (!part_no || !part_name) { alert("Part No and Part name are required."); return; }
+      if (!Number.isFinite(qty) || qty < 0) { alert("Qty must be 0 or more."); return; }
+      if (!Number.isFinite(min_qty) || min_qty < 0) { alert("Min Qty must be 0 or more."); return; }
 
       const { data: inserted, error: pErr } = await sb
         .from("spare_parts")
@@ -1166,19 +1096,13 @@ async function loadPartsScreen() {
         .select("id")
         .single();
 
-      if (pErr) {
-        console.error(pErr);
-        alert(pErr.message);
-        return;
-      }
+      if (pErr) { console.error(pErr); alert(pErr.message); return; }
 
-      const { error: sErr } = await sb.from("stock").insert({ part_id: inserted.id, qty, min_qty, location: location || null });
+      const { error: sErr } = await sb
+        .from("stock")
+        .insert({ part_id: inserted.id, qty, min_qty, location: location || null });
 
-      if (sErr) {
-        console.error(sErr);
-        alert(sErr.message);
-        return;
-      }
+      if (sErr) { console.error(sErr); alert(sErr.message); return; }
 
       modal.close();
       render();
@@ -1230,32 +1154,21 @@ async function loadPartsScreen() {
       const location = modal.el.querySelector("#location").value.trim();
       const is_active = !!modal.el.querySelector("#is_active").checked;
 
-      if (!part_name) {
-        alert("Part name is required.");
-        return;
-      }
-      if (!Number.isFinite(qty) || qty < 0) {
-        alert("Qty must be 0 or more.");
-        return;
-      }
-      if (!Number.isFinite(min_qty) || min_qty < 0) {
-        alert("Min Qty must be 0 or more.");
-        return;
-      }
+      if (!part_name) { alert("Part name is required."); return; }
+      if (!Number.isFinite(qty) || qty < 0) { alert("Qty must be 0 or more."); return; }
+      if (!Number.isFinite(min_qty) || min_qty < 0) { alert("Min Qty must be 0 or more."); return; }
 
-      const { error: pErr } = await sb.from("spare_parts").update({ part_name, uom, is_active }).eq("id", p.id);
-      if (pErr) {
-        console.error(pErr);
-        alert(pErr.message);
-        return;
-      }
+      const { error: pErr } = await sb
+        .from("spare_parts")
+        .update({ part_name, uom, is_active })
+        .eq("id", p.id);
+      if (pErr) { console.error(pErr); alert(pErr.message); return; }
 
-      const { error: sErr } = await sb.from("stock").update({ qty, min_qty, location: location || null }).eq("part_id", p.id);
-      if (sErr) {
-        console.error(sErr);
-        alert(sErr.message);
-        return;
-      }
+      const { error: sErr } = await sb
+        .from("stock")
+        .update({ qty, min_qty, location: location || null })
+        .eq("part_id", p.id);
+      if (sErr) { console.error(sErr); alert(sErr.message); return; }
 
       modal.close();
       render();
@@ -1358,9 +1271,10 @@ async function loadPartsScreen() {
     .on("postgres_changes", { event: "*", schema: "public", table: "spare_parts" }, render)
     .subscribe();
 
-  const ch2 = sb.channel("parts_live_stock").on("postgres_changes", { event: "*", schema: "public", table: "stock" }, render).subscribe();
+  const ch2 = sb
+    .channel("parts_live_stock")
+    .on("postgres_changes", { event: "*", schema: "public", table: "stock" }, render)
+    .subscribe();
 
   activeChannels.push(ch1, ch2);
 }
-
-
