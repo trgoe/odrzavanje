@@ -873,7 +873,13 @@ const csv = [
   cols.join(","),
   ...rows.map((r) =>
     cols.map((c) => {
-      if (dateCols.has(c) && r[c]) return escCsv(fmtDateTime(r[c]));
+if (dateCols.has(c) && r[c]) {
+  const d = parseTs(r[c]);
+  if (!d) return escCsv(r[c]);
+  const pad = (n) => String(n).padStart(2, "0");
+  const formatted = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return `"${formatted}"`;
+}
       return escCsv(r[c]);
     }).join(",")
   ),
@@ -1288,5 +1294,6 @@ async function loadPartsScreen() {
 
   activeChannels.push(ch1, ch2);
 }
+
 
 
