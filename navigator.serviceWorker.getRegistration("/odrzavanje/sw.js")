@@ -39,7 +39,7 @@ async function registerPush() {
   }
 
   try {
-    const reg = await navigator.serviceWorker.register("/sw.js");
+    const reg = await navigator.serviceWorker.register("/odrzavanje/sw.js");
     await navigator.serviceWorker.ready;
 
     const permission = await Notification.requestPermission();
@@ -79,7 +79,7 @@ async function savePushSubscription(subscription) {
 
 async function unregisterPush() {
   if (!("serviceWorker" in navigator)) return;
-  const reg = await navigator.serviceWorker.getRegistration("/sw.js");
+  const reg = await navigator.serviceWorker.getRegistration("/odrzavanje/sw.js");
   if (!reg) return;
   const sub = await reg.pushManager.getSubscription();
   if (sub) {
@@ -673,7 +673,7 @@ async function loadMaintenance() {
       pushBtn.style.display = "none";
       return;
     }
-    const reg = await navigator.serviceWorker.getRegistration("/sw.js");
+    const reg = await navigator.serviceWorker.getRegistration("/odrzavanje/sw.js");
     const sub = reg ? await reg.pushManager.getSubscription() : null;
     pushBtn.textContent = sub ? "🔕 Disable Notifications" : "🔔 Enable Notifications";
   }
@@ -1384,4 +1384,5 @@ async function loadPartsScreen() {
 
   activeChannels.push(ch1, ch2);
 }
+
 
