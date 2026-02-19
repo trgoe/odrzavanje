@@ -197,12 +197,9 @@ async function loadLine(line) {
   app.innerHTML = `
     <div class="header">LINE ${line} — Maintenance Call</div>
 
-    <div class="topbar">
-      <a class="btn" href="#maintenance">Maintenance</a>
-      <a class="btn" href="#monitor">Monitor</a>
-      <a class="btn" href="#parts">Spare Parts</a>
-      <div style="opacity:.8;">Yellow ≥ ${YELLOW_AFTER_MIN}min | Red ≥ ${RED_AFTER_MIN}min</div>
-    </div>
+<div class="topbar">
+  <div style="opacity:.8;">Yellow ≥ ${YELLOW_AFTER_MIN}min | Red ≥ ${RED_AFTER_MIN}min</div>
+</div>
 
     <div style="padding:12px;">
       <div style="font-weight:900;margin-bottom:8px;">Choose station</div>
@@ -1294,6 +1291,7 @@ async function loadPartsScreen() {
 
   activeChannels.push(ch1, ch2);
 }
+
 
 
 
