@@ -5,6 +5,7 @@ const SUPABASE_URL = "https://hfyvjtaumvmaqeqkmiyk.supabase.co";
 const SUPABASE_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhmeXZqdGF1bXZtYXFlcWttaXlrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEyNDgxNTksImV4cCI6MjA4NjgyNDE1OX0.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
 
+
 // !! Replace this with YOUR VAPID public key from: npx web-push generate-vapid-keys
 const VAPID_PUBLIC_KEY = "BP5_YLea06dBZ0qgWjJA-sTlfcxqTLiRTuFywdomqspIHHaBFIf0_n1Ho7azmsW5kRz5oQWYvajU9DhnARxQp2U";
 
@@ -1383,3 +1384,4 @@ async function loadPartsScreen() {
 
   activeChannels.push(ch1, ch2);
 }
+
