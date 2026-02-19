@@ -867,8 +867,17 @@ async function loadMaintenance() {
       "created_at", "taken_at", "done_at", "confirmed_at", "taken_by",
       "maint_comment", "operator_comment", "duration_sec",
     ];
-    const csv = [cols.join(","), ...rows.map((r) => cols.map((c) => escCsv(r[c])).join(","))].join("\n");
-
+    const dateCols = new Set(["created_at", "taken_at", "done_at", "confirmed_at"]);
+const csv = [
+  cols.join(","),
+  ...rows.map((r) =>
+    cols.map((c) => {
+      if (dateCols.has(c) && r[c]) return escCsv(fmtDateTime(r[c]));
+      return escCsv(r[c]);
+    }).join(",")
+  ),
+].join("\n");
+    
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
 
@@ -1278,3 +1287,4 @@ async function loadPartsScreen() {
 
   activeChannels.push(ch1, ch2);
 }
+
