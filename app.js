@@ -5,6 +5,9 @@ const SUPABASE_URL = "https://hfyvjtaumvmaqeqkmiyk.supabase.co";
 const SUPABASE_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhmeXZqdGF1bXZtYXFlcWttaXlrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEyNDgxNTksImV4cCI6MjA4NjgyNDE1OX0.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
 
+// !! Replace this with YOUR VAPID public key from: npx web-push generate-vapid-keys
+const VAPID_PUBLIC_KEY = "BP5_YLea06dBZ0qgWjJA-sTlfcxqTLiRTuFywdomqspIHHaBFIf0_n1Ho7azmsW5kRz5oQWYvajU9DhnARxQp2U";
+
 const YELLOW_AFTER_MIN = 5;
 const RED_AFTER_MIN = 10;
 
@@ -18,6 +21,71 @@ function cleanupRealtime() {
     activeChannels.forEach((ch) => sb.removeChannel(ch));
   } catch (e) {}
   activeChannels = [];
+}
+
+// ====== PUSH NOTIFICATIONS ======
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  return Uint8Array.from([...rawData].map((c) => c.charCodeAt(0)));
+}
+
+async function registerPush() {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    console.log("Push not supported");
+    return;
+  }
+
+  try {
+    const reg = await navigator.serviceWorker.register("/sw.js");
+    await navigator.serviceWorker.ready;
+
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      console.log("Push permission denied");
+      return;
+    }
+
+    const existing = await reg.pushManager.getSubscription();
+    if (existing) {
+      await savePushSubscription(existing);
+      return;
+    }
+
+    const subscription = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+    });
+
+    await savePushSubscription(subscription);
+    console.log("Push registered successfully");
+  } catch (e) {
+    console.error("Push registration failed:", e);
+  }
+}
+
+async function savePushSubscription(subscription) {
+  const json = subscription.toJSON();
+  const { error } = await sb.from("push_subscriptions").upsert({
+    endpoint: json.endpoint,
+    p256dh: json.keys.p256dh,
+    auth: json.keys.auth,
+  }, { onConflict: "endpoint" });
+
+  if (error) console.error("Failed to save push subscription:", error);
+}
+
+async function unregisterPush() {
+  if (!("serviceWorker" in navigator)) return;
+  const reg = await navigator.serviceWorker.getRegistration("/sw.js");
+  if (!reg) return;
+  const sub = await reg.pushManager.getSubscription();
+  if (sub) {
+    await sb.from("push_subscriptions").delete().eq("endpoint", sub.endpoint);
+    await sub.unsubscribe();
+    console.log("Push unsubscribed");
+  }
 }
 
 // ====== TIME HELPERS ======
@@ -197,9 +265,9 @@ async function loadLine(line) {
   app.innerHTML = `
     <div class="header">LINE ${line} — Maintenance Call</div>
 
-<div class="topbar">
-  <div style="opacity:.8;">Yellow ≥ ${YELLOW_AFTER_MIN}min | Red ≥ ${RED_AFTER_MIN}min</div>
-</div>
+    <div class="topbar">
+      <div style="opacity:.8;">Yellow ≥ ${YELLOW_AFTER_MIN}min | Red ≥ ${RED_AFTER_MIN}min</div>
+    </div>
 
     <div style="padding:12px;">
       <div style="font-weight:900;margin-bottom:8px;">Choose station</div>
@@ -361,7 +429,6 @@ async function loadLine(line) {
       if (placeTop) myEl.prepend(card);
       else myEl.appendChild(card);
     } else {
-      // Preserve existing parts HTML before rebuilding inner HTML
       const partsEl = card.querySelector(`#parts-${merged.id}`);
       if (partsEl) partsCache.set(merged.id, partsEl.innerHTML);
 
@@ -407,7 +474,7 @@ async function loadLine(line) {
     if (partsEl) partsEl.innerHTML = html;
   }
 
-  // ---- Subscribe FIRST so no INSERT events are missed during the initial fetch ----
+  // ---- Subscribe FIRST ----
   const ch = sb
     .channel(`line_${line}_live`)
     .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, (payload) => {
@@ -455,7 +522,7 @@ async function loadLine(line) {
 
   activeChannels.push(ch);
 
-  // ---- Initial load (after subscribing so no events are missed) ----
+  // ---- Initial load ----
   const { data: tickets, error: tErr } = await sb
     .from("tickets")
     .select("*")
@@ -476,7 +543,6 @@ async function loadLine(line) {
     if (needsParts(t.status)) updateParts(t.id);
   });
 
-  // ---- Modal ----
   function openCreateTicketModal(line, station) {
     const modal = showModal(`
       <div class="card" style="width:min(560px,92vw);">
@@ -562,6 +628,7 @@ async function loadMaintenance() {
       <input id="dateTo" class="input" type="date" />
 
       <button id="btnExport" class="btn btnBlue">Export CSV</button>
+      <button id="btnPush" class="btn">🔔 Enable Notifications</button>
 
       <a class="btn" href="#monitor">Monitor</a>
       <a class="btn" href="#parts">Spare Parts</a>
@@ -589,6 +656,7 @@ async function loadMaintenance() {
   const fromEl = document.getElementById("dateFrom");
   const toEl = document.getElementById("dateTo");
   const exportBtn = document.getElementById("btnExport");
+  const pushBtn = document.getElementById("btnPush");
 
   const colNEW = document.getElementById("colNEW");
   const colTAK = document.getElementById("colTAKEN");
@@ -597,6 +665,30 @@ async function loadMaintenance() {
   const countNEW = document.getElementById("countNEW");
   const countTAK = document.getElementById("countTAKEN");
   const countDON = document.getElementById("countDONE");
+
+  // Push button — toggle on/off
+  async function updatePushBtn() {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      pushBtn.style.display = "none";
+      return;
+    }
+    const reg = await navigator.serviceWorker.getRegistration("/sw.js");
+    const sub = reg ? await reg.pushManager.getSubscription() : null;
+    pushBtn.textContent = sub ? "🔕 Disable Notifications" : "🔔 Enable Notifications";
+  }
+
+  pushBtn.onclick = async () => {
+    const reg = await navigator.serviceWorker.getRegistration("/sw.js");
+    const sub = reg ? await reg.pushManager.getSubscription() : null;
+    if (sub) {
+      await unregisterPush();
+    } else {
+      await registerPush();
+    }
+    await updatePushBtn();
+  };
+
+  updatePushBtn();
 
   function readState() {
     state.q = (searchEl.value || "").trim().toLowerCase();
@@ -864,24 +956,24 @@ async function loadMaintenance() {
       "created_at", "taken_at", "done_at", "confirmed_at", "taken_by",
       "maint_comment", "operator_comment", "duration_sec",
     ];
-const dateCols = new Set(["created_at", "taken_at", "done_at", "confirmed_at"]);
-console.log("sample created_at:", rows[0]?.created_at, "→", fmtDateTime(rows[0]?.created_at));
-const csv = [
-  cols.join(","),
-  ...rows.map((r) =>
-    cols.map((c) => {
-if (dateCols.has(c) && r[c]) {
-  const d = parseTs(r[c]);
-  if (!d) return escCsv(r[c]);
-  const pad = (n) => String(n).padStart(2, "0");
-  const formatted = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  return `"${formatted}"`;
-}
-      return escCsv(r[c]);
-    }).join(",")
-  ),
-].join("\n");
-    
+
+    const dateCols = new Set(["created_at", "taken_at", "done_at", "confirmed_at"]);
+
+    const csv = [
+      cols.join(","),
+      ...rows.map((r) =>
+        cols.map((c) => {
+          if (dateCols.has(c) && r[c]) {
+            const d = parseTs(r[c]);
+            if (!d) return escCsv(r[c]);
+            const pad = (n) => String(n).padStart(2, "0");
+            return `"${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}"`;
+          }
+          return escCsv(r[c]);
+        }).join(",")
+      ),
+    ].join("\n");
+
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
 
@@ -1291,7 +1383,3 @@ async function loadPartsScreen() {
 
   activeChannels.push(ch1, ch2);
 }
-
-
-
-
