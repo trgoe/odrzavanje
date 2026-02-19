@@ -867,7 +867,8 @@ async function loadMaintenance() {
       "created_at", "taken_at", "done_at", "confirmed_at", "taken_by",
       "maint_comment", "operator_comment", "duration_sec",
     ];
-    const dateCols = new Set(["created_at", "taken_at", "done_at", "confirmed_at"]);
+const dateCols = new Set(["created_at", "taken_at", "done_at", "confirmed_at"]);
+console.log("sample created_at:", rows[0]?.created_at, "→", fmtDateTime(rows[0]?.created_at));
 const csv = [
   cols.join(","),
   ...rows.map((r) =>
@@ -1287,4 +1288,5 @@ async function loadPartsScreen() {
 
   activeChannels.push(ch1, ch2);
 }
+
 
