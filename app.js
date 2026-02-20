@@ -7,7 +7,7 @@ const SUPABASE_KEY =
 
 
 // !! Replace this with YOUR VAPID public key from: npx web-push generate-vapid-keys
-const VAPID_PUBLIC_KEY = "istVFYVGXpf3y7s0K7iqjOLbfFWKTXejlkC0QiSww14";
+const VAPID_PUBLIC_KEY = "BNKx2NaBKWgiJpyI1Tuc6809NYRzQ9SYPYI77C8VMZ5HcuCEkqyT2WZIvORxA65M86oVtUR4mBzRLvkRZZsuTBI";
 
 const YELLOW_AFTER_MIN = 5;
 const RED_AFTER_MIN = 10;
