@@ -1,8 +1,8 @@
 {
   "name": "Maintenance",
   "short_name": "Maintenance",
-  "start_url": "./",
-  "scope": "./",
+  "start_url": "/odrzavanje/",
+  "scope": "/odrzavanje/",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#ffffff"
