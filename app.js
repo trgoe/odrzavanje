@@ -7,7 +7,7 @@ const SUPABASE_KEY =
 
 
 // !! Replace this with YOUR VAPID public key from: npx web-push generate-vapid-keys
-const VAPID_PUBLIC_KEY = "BP5_YLea06dBZ0qgWjJA-sTlfcxqTLiRTuFywdomqspIHHaBFIf0_n1Ho7azmsW5kRz5oQWYvajU9DhnARxQp2U";
+const VAPID_PUBLIC_KEY = "istVFYVGXpf3y7s0K7iqjOLbfFWKTXejlkC0QiSww14";
 
 const YELLOW_AFTER_MIN = 5;
 const RED_AFTER_MIN = 10;
@@ -1384,4 +1384,5 @@ async function loadPartsScreen() {
 
   activeChannels.push(ch1, ch2);
 }
+
 
