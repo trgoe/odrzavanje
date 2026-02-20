@@ -25,9 +25,10 @@ self.addEventListener("push", (e) => {
     // Use paths that match your GitHub Pages subfolder
     icon: data.icon || "/odrzavanje/icon.png",
     badge: data.badge || "/odrzavanje/icon.png",
-    tag: data.tag || "maintenance",
-    renotify: true,
-    requireInteraction: true,
+ tag: data.tag || ("maintenance-" + Date.now()),
+renotify: true,
+requireInteraction: true,
+silent: false,,
     data: {
       url: data.url || "/odrzavanje/#maintenance",
     },
