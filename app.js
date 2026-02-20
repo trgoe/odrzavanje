@@ -5,12 +5,17 @@ const SUPABASE_URL = "https://hfyvjtaumvmaqeqkmiyk.supabase.co";
 const SUPABASE_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhmeXZqdGF1bXZtYXFlcWttaXlrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEyNDgxNTksImV4cCI6MjA4NjgyNDE1OX0.hPMNVRMJClpqbXzV8Ug06K-KHQHdfoUhLKlos66q6do";
 
-
 // !! Replace this with YOUR VAPID public key from: npx web-push generate-vapid-keys
-const VAPID_PUBLIC_KEY = "BNKx2NaBKWgiJpyI1Tuc6809NYRzQ9SYPYI77C8VMZ5HcuCEkqyT2WZIvORxA65M86oVtUR4mBzRLvkRZZsuTBI";
+const VAPID_PUBLIC_KEY =
+  "BNKx2NaBKWgiJpyI1Tuc6809NYRzQ9SYPYI77C8VMZ5HcuCEkqyT2WZIvORxA65M86oVtUR4mBzRLvkRZZsuTBI";
 
 const YELLOW_AFTER_MIN = 5;
 const RED_AFTER_MIN = 10;
+
+// ====== GITHUB PAGES / PWA PATH FIX ======
+// If your app is hosted at https://username.github.io/odrzavanje/ then BASE becomes "/odrzavanje/"
+const BASE = location.pathname.replace(/\/[^/]*$/, "/");
+const SW_URL = BASE + "sw.js";
 
 // ====== INIT ======
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -39,7 +44,8 @@ async function registerPush() {
   }
 
   try {
-    const reg = await navigator.serviceWorker.register("/odrzavanje/sw.js");
+    // IMPORTANT: GitHub Pages-safe path + scope
+    const reg = await navigator.serviceWorker.register(SW_URL, { scope: BASE });
     await navigator.serviceWorker.ready;
 
     const permission = await Notification.requestPermission();
@@ -68,18 +74,23 @@ async function registerPush() {
 
 async function savePushSubscription(subscription) {
   const json = subscription.toJSON();
-  const { error } = await sb.from("push_subscriptions").upsert({
-    endpoint: json.endpoint,
-    p256dh: json.keys.p256dh,
-    auth: json.keys.auth,
-  }, { onConflict: "endpoint" });
+  const { error } = await sb
+    .from("push_subscriptions")
+    .upsert(
+      {
+        endpoint: json.endpoint,
+        p256dh: json.keys.p256dh,
+        auth: json.keys.auth,
+      },
+      { onConflict: "endpoint" }
+    );
 
   if (error) console.error("Failed to save push subscription:", error);
 }
 
 async function unregisterPush() {
   if (!("serviceWorker" in navigator)) return;
-  const reg = await navigator.serviceWorker.getRegistration("/odrzavanje/sw.js");
+  const reg = await navigator.serviceWorker.getRegistration(SW_URL);
   if (!reg) return;
   const sub = await reg.pushManager.getSubscription();
   if (sub) {
@@ -667,19 +678,19 @@ async function loadMaintenance() {
   const countTAK = document.getElementById("countTAKEN");
   const countDON = document.getElementById("countDONE");
 
-  // Push button — toggle on/off
+  // Push button — toggle on/off (FIXED PATHS)
   async function updatePushBtn() {
     if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
       pushBtn.style.display = "none";
       return;
     }
-    const reg = await navigator.serviceWorker.getRegistration("/odrzavanje/sw.js");
+    const reg = await navigator.serviceWorker.getRegistration(SW_URL);
     const sub = reg ? await reg.pushManager.getSubscription() : null;
     pushBtn.textContent = sub ? "🔕 Disable Notifications" : "🔔 Enable Notifications";
   }
 
   pushBtn.onclick = async () => {
-    const reg = await navigator.serviceWorker.getRegistration("/sw.js");
+    const reg = await navigator.serviceWorker.getRegistration(SW_URL);
     const sub = reg ? await reg.pushManager.getSubscription() : null;
     if (sub) {
       await unregisterPush();
@@ -907,7 +918,9 @@ async function loadMaintenance() {
       else by.NEW.push(t);
     });
 
-    ["NEW", "TAKEN", "DONE"].forEach((k) => by[k].sort((a, b) => (calcSeconds(b) || 0) - (calcSeconds(a) || 0)));
+    ["NEW", "TAKEN", "DONE"].forEach((k) =>
+      by[k].sort((a, b) => (calcSeconds(b) || 0) - (calcSeconds(a) || 0))
+    );
 
     colNEW.innerHTML = "";
     colTAK.innerHTML = "";
@@ -1384,5 +1397,3 @@ async function loadPartsScreen() {
 
   activeChannels.push(ch1, ch2);
 }
-
-
