@@ -6,6 +6,11 @@ self.addEventListener("activate", function (e) {
   e.waitUntil(self.clients.claim());
 });
 
+// ✅ Real fetch handler (important for some Chromium builds)
+self.addEventListener("fetch", function (event) {
+  event.respondWith(fetch(event.request));
+});
+
 self.addEventListener("push", function (e) {
   var data = {};
   try {
