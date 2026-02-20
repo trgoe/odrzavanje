@@ -1,39 +1,57 @@
 // ====== SERVICE WORKER — sw.js ======
-// Place this file in the ROOT of your GitHub Pages repo (same folder as index.html)
+// This file must be at: https://trgoe.github.io/odrzavanje/sw.js
 
 self.addEventListener("install", (e) => {
   self.skipWaiting();
 });
 
-
 self.addEventListener("activate", (e) => {
-  e.waitUntil(clients.claim());
+  e.waitUntil(self.clients.claim());
 });
 
+// Handle incoming push messages
 self.addEventListener("push", (e) => {
-  const data = e.data ? e.data.json() : {};
+  let data = {};
+  try {
+    data = e.data ? e.data.json() : {};
+  } catch (err) {
+    data = {};
+  }
+
   const title = data.title || "Maintenance Alert";
+
   const options = {
     body: data.body || "New maintenance request",
-    icon: data.icon || "/icon.png",
-    badge: data.badge || "/icon.png",
+    // Use paths that match your GitHub Pages subfolder
+    icon: data.icon || "/odrzavanje/icon.png",
+    badge: data.badge || "/odrzavanje/icon.png",
     tag: data.tag || "maintenance",
     renotify: true,
     requireInteraction: true,
-    data: { url: data.url || "/" },
+    data: {
+      url: data.url || "/odrzavanje/#maintenance",
+    },
   };
+
   e.waitUntil(self.registration.showNotification(title, options));
 });
 
+// Handle notification click
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();
-  const url = e.notification.data?.url || "/";
+
+  const url = e.notification.data?.url || "/odrzavanje/#maintenance";
+
   e.waitUntil(
-    clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
       for (const client of clientList) {
-        if (client.url.includes(url) && "focus" in client) return client.focus();
+        if (client.url.includes("/odrzavanje") && "focus" in client) {
+          return client.focus();
+        }
       }
-      if (clients.openWindow) return clients.openWindow(url);
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(url);
+      }
     })
   );
 });
